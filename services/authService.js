@@ -132,8 +132,8 @@ const assignRole = async (adminUser, input = {}) => {
     throw new AppError('A valid user email is required', 400);
   }
 
-  if (!['employee', 'hr'].includes(role)) {
-    throw new AppError('Role must be employee or hr', 400);
+  if (!['super_admin', 'admin', 'hr_manager', 'manager', 'employee'].includes(role)) {
+    throw new AppError('Role must be super_admin, admin, hr_manager, manager, or employee', 400);
   }
 
   if (adminUser.email === email) {
