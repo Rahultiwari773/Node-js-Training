@@ -29,7 +29,7 @@ router.post('/logout', authenticate, authController.logout);
 router.post(
 	'/users/role',
 	authenticate,
-	authorize('admin'),
+	authorize('super_admin', 'admin'),
 	roleValidation,
 	validate,
 	authController.assignRole

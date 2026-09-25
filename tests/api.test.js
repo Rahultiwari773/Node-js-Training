@@ -18,6 +18,8 @@ jest.mock('../services/authService', () => ({
 const request = require('supertest');
 const app = require('../app');
 const authService = require('../services/authService');
+const leaveRoutes = require('../routes/leaveRoutes');
+const letterRoutes = require('../routes/letterRoutes');
 
 describe('API security and validation', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -104,6 +106,19 @@ describe('API security and validation', () => {
       success: false,
       message: 'Authorization token is required'
     });
+  });
+
+  test('exposes update routes for leave and letter RBAC flows', () => {
+    const leaveMethods = leaveRoutes.stack
+      .filter((layer) => layer.route)
+      .flatMap((layer) => Object.keys(layer.route.methods));
+
+    const letterMethods = letterRoutes.stack
+      .filter((layer) => layer.route)
+      .flatMap((layer) => Object.keys(layer.route.methods));
+
+    expect(leaveMethods).toContain('put');
+    expect(letterMethods).toContain('put');
   });
 
   test('returns a standard not-found response', async () => {

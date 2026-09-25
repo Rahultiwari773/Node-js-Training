@@ -60,7 +60,7 @@ const sendEmail = async ({ to, subject, text, html }) => {
 };
 
 const sendVerificationEmail = (user, token) => {
-  const verificationUrl = `${appUrl}/api/auth/verify-email?token=${token}`;
+  const verificationUrl = `${appUrl}/?mode=verify&token=${token}`;
 
   return sendEmail({
     to: user.email,
@@ -77,7 +77,7 @@ const sendVerificationEmail = (user, token) => {
 };
 
 const sendPasswordResetEmail = (user, token) => {
-  const resetUrl = `${appUrl}/api/auth/reset-password?token=${token}`;
+  const resetUrl = `${appUrl}/?mode=reset&token=${token}`;
 
   return sendEmail({
     to: user.email,
@@ -93,4 +93,35 @@ const sendPasswordResetEmail = (user, token) => {
   });
 };
 
-module.exports = { sendVerificationEmail, sendPasswordResetEmail };
+const sendAnnouncementEmail = (user, announcement) => sendEmail({
+  to: user.email,
+  subject: `New announcement: ${announcement.title}`,
+  text: `Hello ${user.name},\n\n${announcement.title}\n\n${announcement.description}\n\nView it in Employee Portal: ${appUrl}/`,
+  html: emailLayout({
+    name: user.name,
+    title: announcement.title,
+    message: announcement.description,
+    buttonText: 'Open Employee Portal',
+    buttonUrl: appUrl
+  })
+});
+
+const sendAnnouncementEmails = async (users, announcement) => {
+  const results = await Promise.allSettled(
+    users.map((user) => sendAnnouncementEmail(user, announcement))
+  );
+
+  return {
+    sent: results.filter((result) => result.status === 'fulfilled').length,
+    failed: results.filter((result) => result.status === 'rejected').length
+  };
+};
+
+const sendLetterEmail = (user, letter) => sendEmail({
+  to: user.email,
+  subject: `${letter.title} - Employee Portal`,
+  text: `Hello ${user.name},\n\nYour ${letter.letterType} letter is ready in Employee Portal.`,
+  html: letter.content
+});
+
+module.exports = { sendVerificationEmail, sendPasswordResetEmail, sendAnnouncementEmails, sendLetterEmail };

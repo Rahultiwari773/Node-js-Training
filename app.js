@@ -3,6 +3,10 @@ const path = require('path');
 const employeeRoutes = require('./routes/employeeRoutes');
 const salaryRoutes = require('./routes/salaryRoutes');
 const authRoutes = require('./routes/authRoutes');
+const leaveRoutes = require('./routes/leaveRoutes');
+const letterRoutes = require('./routes/letterRoutes');
+const announcementRoutes = require('./routes/announcementRoutes');
+const policyRoutes = require('./routes/policyRoutes');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 const {
   securityHeaders,
@@ -31,6 +35,10 @@ app.use('/api', apiLimiter);
 app.use('/api/employees', employeeRoutes);
 app.use('/api/salaries', salaryRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/api/leaves', leaveRoutes);
+app.use('/api/letters', letterRoutes);
+app.use('/api/announcements', announcementRoutes);
+app.use('/api/policies', policyRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
