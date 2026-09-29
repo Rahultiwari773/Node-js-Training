@@ -31,8 +31,8 @@ router.get('/:id/files/:fileId', fileIdValidation, validate, fileAccess, downloa
 
 router.use(authenticate);
 
-router.get('/', authorize('admin', 'hr', 'employee'), getEmployees);
-router.get('/:id', employeeIdValidation, validate, authorize('admin', 'hr', 'employee'), getEmployeeById);
+router.get('/', authorize('super_admin', 'admin', 'hr_manager', 'manager', 'employee'), getEmployees);
+router.get('/:id', employeeIdValidation, validate, authorize('super_admin', 'admin', 'hr_manager', 'manager', 'employee'), getEmployeeById);
 router.post('/', createEmployeeValidation, validate, authorize('admin', 'hr'), createEmployee);
 router.put('/:id', employeeIdValidation, updateEmployeeValidation, validate, authorize('admin', 'hr'), updateEmployee);
 router.delete('/:id', employeeIdValidation, validate, authorize('admin', 'hr'), deleteEmployee);

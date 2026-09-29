@@ -7,6 +7,8 @@ const {
   createOneTimeToken,
   hashToken,
   createAccessToken,
+  createRefreshToken,
+  verifyRefreshToken,
   createFilePreviewToken
 } = require('../utils/token');
 
@@ -26,11 +28,25 @@ describe('token utilities', () => {
   });
 
   test('creates an access token with the user identity and version', () => {
-    const token = createAccessToken(user);
+    const token = createAccessToken(user, '507f1f77bcf86cd799439012');
     const payload = jwt.verify(token, process.env.JWT_SECRET);
 
     expect(payload.sub).toBe(user._id);
     expect(payload.tokenVersion).toBe(3);
+    expect(payload.purpose).toBe('access');
+    expect(payload.sid).toBe('507f1f77bcf86cd799439012');
+    expect(payload.exp - payload.iat).toBe(15 * 60);
+  });
+
+  test('creates refresh tokens scoped to a session and rejects access tokens as refresh tokens', () => {
+    const sessionId = '507f1f77bcf86cd799439012';
+    const token = createRefreshToken(user, sessionId, 'rotating-id', new Date(Date.now() + 3600_000));
+    const payload = verifyRefreshToken(token);
+
+    expect(payload.purpose).toBe('refresh');
+    expect(payload.sid).toBe(sessionId);
+    expect(payload.jti).toBe('rotating-id');
+    expect(() => verifyRefreshToken(createAccessToken(user, sessionId))).toThrow();
   });
 
   test('scopes file preview tokens to one file', () => {

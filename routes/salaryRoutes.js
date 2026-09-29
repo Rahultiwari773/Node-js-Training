@@ -19,8 +19,8 @@ const router = express.Router();
 
 router.use(authenticate);
 
-router.get('/', authorize('admin', 'hr', 'employee'), getSalaries);
-router.get('/:id', salaryIdValidation, validate, authorize('admin', 'hr', 'employee'), getSalaryById);
+router.get('/', authorize('super_admin', 'admin', 'hr_manager', 'manager', 'employee'), getSalaries);
+router.get('/:id', salaryIdValidation, validate, authorize('super_admin', 'admin', 'hr_manager', 'manager', 'employee'), getSalaryById);
 router.post('/', createSalaryValidation, validate, authorize('admin', 'hr'), createSalary);
 router.put('/:id', salaryIdValidation, updateSalaryValidation, validate, authorize('admin', 'hr'), updateSalary);
 router.delete('/:id', salaryIdValidation, validate, authorize('admin', 'hr'), deleteSalary);

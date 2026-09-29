@@ -1,9 +1,24 @@
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const { authenticator } = require('otplib');
+const QRCode = require('qrcode');
 const User = require('../models/userModel');
+const AuthSession = require('../models/authSessionModel');
 const AppError = require('../utils/appError');
-const { jwtExpiresIn, verificationTokenMinutes, resetTokenMinutes } = require('../config/env');
-const { createOneTimeToken, hashToken, createAccessToken } = require('../utils/token');
+const { verificationTokenMinutes, resetTokenMinutes } = require('../config/env');
+const {
+  createOneTimeToken,
+  hashToken,
+  createAccessCredentials,
+  createRefreshToken,
+  createTokenId,
+  getRefreshExpiry,
+  verifyRefreshToken
+} = require('../utils/token');
+const { encryptSecret, decryptSecret } = require('../utils/totp');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../utils/mailer');
+
+authenticator.options = { step: 30, window: 1 };
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -29,8 +44,52 @@ const publicUser = (user) => ({
   email: user.email,
   role: user.role,
   isEmailVerified: user.isEmailVerified,
+  twoFactorEnabled: user.twoFactorEnabled,
   createdAt: user.createdAt
 });
+
+const normalizeRecoveryCode = (code) => String(code || '').replace(/[\s-]/g, '').toUpperCase();
+
+const generateRecoveryCodes = () => Array.from({ length: 10 }, () => (
+  crypto.randomBytes(8).toString('hex').toUpperCase()
+));
+
+const verifySecondFactor = (user, code) => {
+  const normalizedCode = String(code || '').trim();
+  if (!normalizedCode) return false;
+
+  if (user.twoFactorSecretEncrypted
+    && authenticator.check(normalizedCode, decryptSecret(user.twoFactorSecretEncrypted))) {
+    return true;
+  }
+
+  const recoveryCodeHash = hashToken(normalizeRecoveryCode(normalizedCode));
+  const recoveryCodeIndex = user.twoFactorRecoveryCodeHashes
+    .findIndex((storedHash) => storedHash === recoveryCodeHash);
+  if (recoveryCodeIndex === -1) return false;
+
+  user.twoFactorRecoveryCodeHashes.splice(recoveryCodeIndex, 1);
+  return true;
+};
+
+const createSessionCredentials = async (user, metadata = {}) => {
+  const tokenId = createTokenId();
+  const expiresAt = getRefreshExpiry();
+  const session = await AuthSession.create({
+    userId: user._id,
+    refreshTokenHash: hashToken(tokenId),
+    deviceName: String(metadata.deviceName || metadata.userAgent || 'Unknown device').slice(0, 180),
+    ipAddress: String(metadata.ipAddress || '').slice(0, 64),
+    expiresAt
+  });
+
+  return {
+    ...createAccessCredentials(user, session._id),
+    refreshToken: createRefreshToken(user, session._id, tokenId, expiresAt),
+    refreshExpiresAt: expiresAt,
+    sessionId: session._id.toString()
+  };
+};
 
 const register = async (input = {}) => {
   const { name, email, password } = input;
@@ -100,13 +159,14 @@ const resendVerification = async (email) => {
   return { message: 'If the account exists and is unverified, a verification email was sent.' };
 };
 
-const login = async (input = {}) => {
-  const { email, password } = input;
+const login = async (input = {}, metadata = {}) => {
+  const { email, password, twoFactorCode } = input;
   if (!emailPattern.test(normalizeEmail(email)) || typeof password !== 'string' || !password) {
     throw new AppError('Valid email and password are required', 400);
   }
 
-  const user = await User.findOne({ email: normalizeEmail(email) }).select('+password');
+  const user = await User.findOne({ email: normalizeEmail(email) })
+    .select('+password +twoFactorSecretEncrypted +twoFactorRecoveryCodeHashes');
   if (!user || !(await bcrypt.compare(password, user.password))) {
     throw new AppError('Invalid email or password', 401);
   }
@@ -115,11 +175,218 @@ const login = async (input = {}) => {
     throw new AppError('Please verify your email before logging in', 403);
   }
 
+  if (user.twoFactorEnabled) {
+    if (!twoFactorCode) return { requiresTwoFactor: true };
+    if (!verifySecondFactor(user, twoFactorCode)) {
+      throw new AppError('Authenticator or recovery code is invalid', 401);
+    }
+    await user.save();
+  }
+
   return {
-    token: createAccessToken(user),
-    expiresIn: jwtExpiresIn,
+    ...(await createSessionCredentials(user, metadata)),
     user: publicUser(user)
   };
+};
+
+const refreshSession = async (refreshToken) => {
+  if (!refreshToken) throw new AppError('Refresh token is required', 401);
+
+  let payload;
+  try {
+    payload = verifyRefreshToken(refreshToken);
+  } catch (error) {
+    throw new AppError('Refresh token is invalid or expired', 401);
+  }
+
+  const session = await AuthSession.findById(payload.sid).select('+refreshTokenHash');
+  if (!session || session.userId.toString() !== payload.sub || session.revokedAt
+    || session.expiresAt <= new Date()) {
+    throw new AppError('Session is invalid or expired', 401);
+  }
+
+  const user = await User.findById(payload.sub);
+  if (!user || user.tokenVersion !== payload.tokenVersion) {
+    session.revokedAt = new Date();
+    await session.save();
+    throw new AppError('Session is invalid or expired', 401);
+  }
+
+  const presentedHash = hashToken(payload.jti);
+  if (session.refreshTokenHash !== presentedHash) {
+    session.revokedAt = new Date();
+    await session.save();
+    throw new AppError('Refresh token reuse detected. Sign in again.', 401);
+  }
+
+  const nextTokenId = createTokenId();
+  const now = new Date();
+  const rotatedSession = await AuthSession.findOneAndUpdate(
+    {
+      _id: session._id,
+      userId: user._id,
+      refreshTokenHash: presentedHash,
+      revokedAt: null,
+      expiresAt: { $gt: now }
+    },
+    {
+      $set: {
+        refreshTokenHash: hashToken(nextTokenId),
+        lastUsedAt: now
+      }
+    },
+    { new: true }
+  );
+
+  if (!rotatedSession) {
+    await AuthSession.updateOne(
+      { _id: session._id, revokedAt: null },
+      { $set: { revokedAt: now } }
+    );
+    throw new AppError('Refresh token reuse detected. Sign in again.', 401);
+  }
+
+  return {
+    ...createAccessCredentials(user, session._id),
+    refreshToken: createRefreshToken(user, session._id, nextTokenId, session.expiresAt),
+    refreshExpiresAt: session.expiresAt,
+    sessionId: session._id.toString()
+  };
+};
+
+const listSessions = async (user, currentSessionId) => {
+  const sessions = await AuthSession.find({
+    userId: user._id,
+    revokedAt: null,
+    expiresAt: { $gt: new Date() }
+  }).sort({ lastUsedAt: -1 }).select('deviceName ipAddress createdAt lastUsedAt expiresAt');
+
+  return sessions.map((session) => ({
+    id: session._id,
+    deviceName: session.deviceName,
+    ipAddress: session.ipAddress,
+    createdAt: session.createdAt,
+    lastUsedAt: session.lastUsedAt,
+    expiresAt: session.expiresAt,
+    current: session._id.toString() === currentSessionId
+  }));
+};
+
+const revokeSession = async (user, sessionId) => {
+  const session = await AuthSession.findOneAndUpdate(
+    { _id: sessionId, userId: user._id, revokedAt: null },
+    { $set: { revokedAt: new Date() } },
+    { new: true }
+  );
+  if (!session) throw new AppError('Active session not found', 404);
+  return { message: 'Session revoked successfully' };
+};
+
+const logout = async (user, sessionId) => {
+  if (sessionId) {
+    await AuthSession.updateOne(
+      { _id: sessionId, userId: user._id, revokedAt: null },
+      { $set: { revokedAt: new Date() } }
+    );
+  } else {
+    user.tokenVersion += 1;
+    await user.save();
+  }
+  return { message: 'Logged out successfully' };
+};
+
+const logoutAll = async (user) => {
+  user.tokenVersion += 1;
+  await user.save();
+  await AuthSession.updateMany(
+    { userId: user._id, revokedAt: null },
+    { $set: { revokedAt: new Date() } }
+  );
+  return { message: 'All sessions have been revoked' };
+};
+
+const beginTwoFactorSetup = async (user, password) => {
+  const currentUser = await User.findById(user._id).select('+password');
+  if (currentUser.twoFactorEnabled) throw new AppError('Two-factor authentication is already enabled', 409);
+  if (!(await bcrypt.compare(String(password || ''), currentUser.password))) {
+    throw new AppError('Password is invalid', 401);
+  }
+
+  const secret = authenticator.generateSecret();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  currentUser.twoFactorPendingSecretEncrypted = encryptSecret(secret);
+  currentUser.twoFactorPendingExpires = expiresAt;
+  await currentUser.save();
+
+  const otpauthUrl = authenticator.keyuri(currentUser.email, 'Employee Portal', secret);
+  return {
+    secret,
+    qrCode: await QRCode.toDataURL(otpauthUrl),
+    expiresAt
+  };
+};
+
+const enableTwoFactor = async (user, code) => {
+  const currentUser = await User.findById(user._id)
+    .select('+twoFactorPendingSecretEncrypted +twoFactorPendingExpires');
+  if (!currentUser.twoFactorPendingSecretEncrypted
+    || !currentUser.twoFactorPendingExpires
+    || currentUser.twoFactorPendingExpires <= new Date()) {
+    throw new AppError('Two-factor setup expired. Start setup again.', 400);
+  }
+
+  const secret = decryptSecret(currentUser.twoFactorPendingSecretEncrypted);
+  if (!authenticator.check(String(code || ''), secret)) {
+    throw new AppError('Authenticator code is invalid', 400);
+  }
+
+  const recoveryCodes = generateRecoveryCodes();
+  currentUser.twoFactorEnabled = true;
+  currentUser.twoFactorSecretEncrypted = currentUser.twoFactorPendingSecretEncrypted;
+  currentUser.twoFactorPendingSecretEncrypted = undefined;
+  currentUser.twoFactorPendingExpires = undefined;
+  currentUser.twoFactorRecoveryCodeHashes = recoveryCodes.map((value) => hashToken(value));
+  await currentUser.save();
+
+  return { message: 'Two-factor authentication enabled', recoveryCodes };
+};
+
+const disableTwoFactor = async (user, input = {}) => {
+  const currentUser = await User.findById(user._id)
+    .select('+password +twoFactorSecretEncrypted +twoFactorRecoveryCodeHashes');
+  if (!currentUser.twoFactorEnabled) throw new AppError('Two-factor authentication is not enabled', 409);
+  if (!(await bcrypt.compare(String(input.password || ''), currentUser.password))) {
+    throw new AppError('Password is invalid', 401);
+  }
+  if (!verifySecondFactor(currentUser, input.code)) {
+    throw new AppError('Authenticator or recovery code is invalid', 401);
+  }
+
+  currentUser.twoFactorEnabled = false;
+  currentUser.twoFactorSecretEncrypted = undefined;
+  currentUser.twoFactorPendingSecretEncrypted = undefined;
+  currentUser.twoFactorPendingExpires = undefined;
+  currentUser.twoFactorRecoveryCodeHashes = [];
+  currentUser.tokenVersion += 1;
+  await currentUser.save();
+  await AuthSession.updateMany(
+    { userId: currentUser._id, revokedAt: null },
+    { $set: { revokedAt: new Date() } }
+  );
+  return { message: 'Two-factor authentication disabled. Sign in again.' };
+};
+
+const regenerateRecoveryCodes = async (user, code) => {
+  const currentUser = await User.findById(user._id)
+    .select('+twoFactorSecretEncrypted +twoFactorRecoveryCodeHashes');
+  if (!currentUser.twoFactorEnabled || !verifySecondFactor(currentUser, code)) {
+    throw new AppError('Authenticator or recovery code is invalid', 401);
+  }
+
+  const recoveryCodes = generateRecoveryCodes();
+  currentUser.twoFactorRecoveryCodeHashes = recoveryCodes.map((value) => hashToken(value));
+  await currentUser.save();
+  return { recoveryCodes };
 };
 
 const getProfile = (user) => publicUser(user);
@@ -197,14 +464,12 @@ const resetPassword = async (token, password) => {
   user.passwordResetExpires = undefined;
   user.tokenVersion += 1;
   await user.save();
+  await AuthSession.updateMany(
+    { userId: user._id, revokedAt: null },
+    { $set: { revokedAt: new Date() } }
+  );
 
   return { message: 'Password reset successfully. Please log in again.' };
-};
-
-const logout = async (user) => {
-  user.tokenVersion += 1;
-  await user.save();
-  return { message: 'Logged out successfully' };
 };
 
 module.exports = {
@@ -212,7 +477,15 @@ module.exports = {
   verifyEmail,
   resendVerification,
   login,
+  refreshSession,
   getProfile,
+  listSessions,
+  revokeSession,
+  logoutAll,
+  beginTwoFactorSetup,
+  enableTwoFactor,
+  disableTwoFactor,
+  regenerateRecoveryCodes,
   assignRole,
   forgotPassword,
   resetPassword,

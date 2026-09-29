@@ -7,6 +7,7 @@ jest.mock('../services/authService', () => ({
   verifyEmail: jest.fn(),
   resendVerification: jest.fn(),
   login: jest.fn(),
+  refreshSession: jest.fn(),
   forgotPassword: jest.fn(),
   resetPasswordPage: jest.fn(),
   resetPassword: jest.fn(),
@@ -18,6 +19,7 @@ jest.mock('../services/authService', () => ({
 const request = require('supertest');
 const app = require('../app');
 const authService = require('../services/authService');
+const authRoutes = require('../routes/authRoutes');
 const leaveRoutes = require('../routes/leaveRoutes');
 const letterRoutes = require('../routes/letterRoutes');
 
@@ -74,8 +76,11 @@ describe('API security and validation', () => {
 
   test('accepts a valid login and returns the service response', async () => {
     authService.login.mockResolvedValue({
-      token: 'test-access-token',
-      expiresIn: '1d',
+      accessToken: 'test-access-token',
+      expiresIn: 900,
+      refreshToken: 'test-refresh-token',
+      refreshExpiresAt: new Date(Date.now() + 60_000),
+      sessionId: 'session-id',
       user: { id: 'user-id', email: 'user@example.com', role: 'employee' }
     });
 
@@ -87,19 +92,85 @@ describe('API security and validation', () => {
     expect(response.body).toEqual({
       success: true,
       data: {
-        token: 'test-access-token',
-        expiresIn: '1d',
+        accessToken: 'test-access-token',
+        expiresIn: 900,
+        sessionId: 'session-id',
         user: { id: 'user-id', email: 'user@example.com', role: 'employee' }
       }
     });
-    expect(authService.login).toHaveBeenCalledWith({
-      email: 'user@example.com',
-      password: 'Password123'
+    expect(response.headers['set-cookie'][0]).toContain('employeePortalRefresh=test-refresh-token');
+    expect(response.headers['set-cookie'][0]).toContain('HttpOnly');
+    expect(response.body.data).not.toHaveProperty('refreshToken');
+    expect(authService.login).toHaveBeenCalledWith(
+      {
+        email: 'user@example.com',
+        password: 'Password123'
+      },
+      expect.objectContaining({ ipAddress: expect.any(String) })
+    );
+  });
+
+  test('rotates the refresh cookie without returning it in JSON', async () => {
+    authService.refreshSession.mockResolvedValue({
+      accessToken: 'new-access-token',
+      expiresIn: 900,
+      refreshToken: 'new-refresh-token',
+      refreshExpiresAt: new Date(Date.now() + 60_000),
+      sessionId: 'session-id'
     });
+
+    const response = await request(app)
+      .post('/api/auth/refresh')
+      .set('Cookie', 'employeePortalRefresh=old-refresh-token');
+
+    expect(response.status).toBe(200);
+    expect(authService.refreshSession).toHaveBeenCalledWith('old-refresh-token');
+    expect(response.body.data).toEqual({ accessToken: 'new-access-token', expiresIn: 900, sessionId: 'session-id' });
+    expect(response.body.data).not.toHaveProperty('refreshToken');
+    expect(response.headers['set-cookie'][0]).toContain('employeePortalRefresh=new-refresh-token');
+  });
+
+  test('returns a second-factor challenge without creating a session cookie', async () => {
+    authService.login.mockResolvedValue({ requiresTwoFactor: true });
+
+    const response = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'user@example.com', password: 'Password123' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({ requiresTwoFactor: true });
+    expect(response.headers['set-cookie']).toBeUndefined();
+  });
+
+  test('registers refresh, session, global logout, and two-factor endpoints', () => {
+    const routes = authRoutes.stack
+      .filter((layer) => layer.route)
+      .flatMap((layer) => Object.keys(layer.route.methods).map((method) => `${method} ${layer.route.path}`));
+
+    expect(routes).toEqual(expect.arrayContaining([
+      'post /refresh',
+      'get /sessions',
+      'delete /sessions/:id',
+      'post /logout-all',
+      'post /2fa/setup',
+      'post /2fa/enable',
+      'post /2fa/disable',
+      'post /2fa/recovery-codes'
+    ]));
   });
 
   test('requires authentication for employee resources', async () => {
     const response = await request(app).get('/api/employees');
+
+    expect(response.status).toBe(401);
+    expect(response.body).toEqual({
+      success: false,
+      message: 'Authorization token is required'
+    });
+  });
+
+  test('requires authentication for document resources', async () => {
+    const response = await request(app).get('/api/documents');
 
     expect(response.status).toBe(401);
     expect(response.body).toEqual({

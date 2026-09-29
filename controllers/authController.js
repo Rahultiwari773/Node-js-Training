@@ -2,13 +2,32 @@ const authService = require('../services/authService');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/response');
 
+const refreshCookieName = 'employeePortalRefresh';
+const refreshCookieOptions = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'strict',
+  path: '/api/auth'
+};
+
+const sendTokenResponse = (res, result, statusCode = 200) => {
+  const { refreshToken, refreshExpiresAt, ...publicResult } = result;
+  if (refreshToken) {
+    res.cookie(refreshCookieName, refreshToken, {
+      ...refreshCookieOptions,
+      maxAge: Math.max(0, new Date(refreshExpiresAt).getTime() - Date.now())
+    });
+  }
+  sendSuccess(res, publicResult, statusCode);
+};
+
 const register = asyncHandler(async (req, res) => {
   const result = await authService.register(req.body || {});
   sendSuccess(res, result, 201);
 });
 
 const verifyEmail = asyncHandler(async (req, res) => {
-  const result = await authService.verifyEmail(req.query.token);
+  const result = await authService.verifyEmail((req.body || {}).token || req.query.token);
   sendSuccess(res, result);
 });
 
@@ -18,8 +37,24 @@ const resendVerification = asyncHandler(async (req, res) => {
 });
 
 const login = asyncHandler(async (req, res) => {
-  const result = await authService.login(req.body || {});
-  sendSuccess(res, result);
+  const result = await authService.login(req.body || {}, {
+    deviceName: req.get('user-agent'),
+    ipAddress: req.ip
+  });
+  if (result.requiresTwoFactor) return sendSuccess(res, result);
+  sendTokenResponse(res, result);
+});
+
+const refresh = asyncHandler(async (req, res) => {
+  try {
+    const result = await authService.refreshSession(req.cookies?.[refreshCookieName]);
+    sendTokenResponse(res, result);
+  } catch (error) {
+    if (error.statusCode === 401) {
+      res.clearCookie(refreshCookieName, refreshCookieOptions);
+    }
+    throw error;
+  }
 });
 
 const getProfile = asyncHandler(async (req, res) => {
@@ -97,8 +132,46 @@ const resetPassword = asyncHandler(async (req, res) => {
 });
 
 const logout = asyncHandler(async (req, res) => {
-  const result = await authService.logout(req.user);
+  const result = await authService.logout(req.user, req.authSessionId);
+  res.clearCookie(refreshCookieName, refreshCookieOptions);
   sendSuccess(res, result);
+});
+
+const logoutAll = asyncHandler(async (req, res) => {
+  const result = await authService.logoutAll(req.user);
+  res.clearCookie(refreshCookieName, refreshCookieOptions);
+  sendSuccess(res, result);
+});
+
+const listSessions = asyncHandler(async (req, res) => {
+  const sessions = await authService.listSessions(req.user, req.authSessionId);
+  sendSuccess(res, { sessions });
+});
+
+const revokeSession = asyncHandler(async (req, res) => {
+  const result = await authService.revokeSession(req.user, req.params.id);
+  if (req.params.id === req.authSessionId) {
+    res.clearCookie(refreshCookieName, refreshCookieOptions);
+  }
+  sendSuccess(res, result);
+});
+
+const beginTwoFactorSetup = asyncHandler(async (req, res) => {
+  sendSuccess(res, await authService.beginTwoFactorSetup(req.user, (req.body || {}).password));
+});
+
+const enableTwoFactor = asyncHandler(async (req, res) => {
+  sendSuccess(res, await authService.enableTwoFactor(req.user, (req.body || {}).code));
+});
+
+const disableTwoFactor = asyncHandler(async (req, res) => {
+  const result = await authService.disableTwoFactor(req.user, req.body || {});
+  res.clearCookie(refreshCookieName, refreshCookieOptions);
+  sendSuccess(res, result);
+});
+
+const regenerateRecoveryCodes = asyncHandler(async (req, res) => {
+  sendSuccess(res, await authService.regenerateRecoveryCodes(req.user, (req.body || {}).code));
 });
 
 module.exports = {
@@ -106,10 +179,18 @@ module.exports = {
   verifyEmail,
   resendVerification,
   login,
+  refresh,
   getProfile,
   assignRole,
   forgotPassword,
   resetPasswordPage,
   resetPassword,
-  logout
+  logout,
+  logoutAll,
+  listSessions,
+  revokeSession,
+  beginTwoFactorSetup,
+  enableTwoFactor,
+  disableTwoFactor,
+  regenerateRecoveryCodes
 };

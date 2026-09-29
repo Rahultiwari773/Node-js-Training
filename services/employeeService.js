@@ -13,7 +13,7 @@ const validateId = (id) => {
   }
 };
 
-const canAccessAllEmployees = (user) => ['admin', 'hr'].includes(user.role);
+const canAccessAllEmployees = (user) => ['super_admin', 'admin', 'hr_manager', 'hr'].includes(user.role);
 
 const employeeAccessFilter = (user) => (canAccessAllEmployees(user)
   ? {}

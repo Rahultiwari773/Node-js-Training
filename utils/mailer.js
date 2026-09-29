@@ -60,7 +60,7 @@ const sendEmail = async ({ to, subject, text, html }) => {
 };
 
 const sendVerificationEmail = (user, token) => {
-  const verificationUrl = `${appUrl}/?mode=verify&token=${token}`;
+  const verificationUrl = `${appUrl}/?mode=verify#token=${token}`;
 
   return sendEmail({
     to: user.email,
@@ -77,7 +77,7 @@ const sendVerificationEmail = (user, token) => {
 };
 
 const sendPasswordResetEmail = (user, token) => {
-  const resetUrl = `${appUrl}/?mode=reset&token=${token}`;
+  const resetUrl = `${appUrl}/?mode=reset#token=${token}`;
 
   return sendEmail({
     to: user.email,

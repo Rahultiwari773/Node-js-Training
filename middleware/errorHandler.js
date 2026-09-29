@@ -5,10 +5,13 @@ const errorHandler = (error, req, res, next) => {
 
   const statusCode = error.statusCode
     || (error.code === 'LIMIT_FILE_SIZE' ? 400 : null)
+    || (error.name === 'MulterError' ? 400 : null)
     || (error.code === 11000 ? 409 : null)
     || (error.name === 'ValidationError' ? 400 : 500);
   const message = error.code === 'LIMIT_FILE_SIZE'
     ? 'File size must not exceed 5 MB'
+    : error.name === 'MulterError'
+    ? 'Invalid file upload'
     : error.code === 11000
     ? 'A record with that unique value already exists'
     : error.message || 'Internal server error';

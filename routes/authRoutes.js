@@ -10,22 +10,33 @@ const {
 	emailValidation,
 	passwordValidation,
 	roleValidation,
-	tokenQueryValidation
+	tokenQueryValidation,
+	tokenBodyValidation,
+	sessionIdValidation,
+	twoFactorCodeValidation,
+	disableTwoFactorValidation
 } = require('../validators/authValidators');
 
 const router = express.Router();
 
-router.use(authLimiter);
-
-router.post('/register', registerValidation, validate, authController.register);
-router.get('/verify-email', tokenQueryValidation, validate, authController.verifyEmail);
-router.post('/resend-verification', emailValidation, validate, authController.resendVerification);
-router.post('/login', loginValidation, validate, authController.login);
-router.post('/forgot-password', emailValidation, validate, authController.forgotPassword);
+router.post('/register', authLimiter, registerValidation, validate, authController.register);
+router.get('/verify-email', authLimiter, tokenQueryValidation, validate, authController.verifyEmail);
+router.post('/verify-email', authLimiter, tokenBodyValidation, validate, authController.verifyEmail);
+router.post('/resend-verification', authLimiter, emailValidation, validate, authController.resendVerification);
+router.post('/login', authLimiter, loginValidation, validate, authController.login);
+router.post('/refresh', authLimiter, authController.refresh);
+router.post('/forgot-password', authLimiter, emailValidation, validate, authController.forgotPassword);
 router.get('/reset-password', tokenQueryValidation, validate, authController.resetPasswordPage);
-router.post('/reset-password', passwordValidation, validate, authController.resetPassword);
+router.post('/reset-password', authLimiter, passwordValidation, validate, authController.resetPassword);
 router.get('/profile', authenticate, authController.getProfile);
 router.post('/logout', authenticate, authController.logout);
+router.post('/logout-all', authenticate, authController.logoutAll);
+router.get('/sessions', authenticate, authController.listSessions);
+router.delete('/sessions/:id', authenticate, sessionIdValidation, validate, authController.revokeSession);
+router.post('/2fa/setup', authLimiter, authenticate, passwordValidation, validate, authController.beginTwoFactorSetup);
+router.post('/2fa/enable', authLimiter, authenticate, twoFactorCodeValidation, validate, authController.enableTwoFactor);
+router.post('/2fa/disable', authLimiter, authenticate, disableTwoFactorValidation, validate, authController.disableTwoFactor);
+router.post('/2fa/recovery-codes', authLimiter, authenticate, twoFactorCodeValidation, validate, authController.regenerateRecoveryCodes);
 router.post(
 	'/users/role',
 	authenticate,

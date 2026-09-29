@@ -11,7 +11,7 @@ const validateSalaryId = (id) => {
   }
 };
 
-const canAccessAllSalaries = (user) => ['admin', 'hr'].includes(user.role);
+const canAccessAllSalaries = (user) => ['super_admin', 'admin', 'hr_manager', 'hr'].includes(user.role);
 
 const getSalaryAccessFilter = async (user) => {
   if (canAccessAllSalaries(user)) {

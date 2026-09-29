@@ -1,4 +1,4 @@
-const { body, query } = require('express-validator');
+const { body, param, query } = require('express-validator');
 
 const email = (field = 'email') => body(field)
   .trim()
@@ -14,7 +14,9 @@ const registerValidation = [
 
 const loginValidation = [
   email(),
-  body('password').isString().notEmpty().withMessage('Password is required')
+  body('password').isString().notEmpty().withMessage('Password is required'),
+  body('twoFactorCode').optional().isString().isLength({ min: 6, max: 32 })
+    .withMessage('Authenticator or recovery code is invalid')
 ];
 
 const emailValidation = [email()];
@@ -32,11 +34,33 @@ const tokenQueryValidation = [
   query('token').trim().notEmpty().withMessage('Token is required')
 ];
 
+const tokenBodyValidation = [
+  body('token').trim().notEmpty().withMessage('Token is required')
+];
+
+const sessionIdValidation = [
+  param('id').isMongoId().withMessage('Invalid session ID')
+];
+
+const twoFactorCodeValidation = [
+  body('code').isString().isLength({ min: 6, max: 32 })
+    .withMessage('Authenticator or recovery code is required')
+];
+
+const disableTwoFactorValidation = [
+  ...twoFactorCodeValidation,
+  body('password').isString().notEmpty().withMessage('Password is required')
+];
+
 module.exports = {
   registerValidation,
   loginValidation,
   emailValidation,
   passwordValidation,
   roleValidation,
-  tokenQueryValidation
+  tokenQueryValidation,
+  tokenBodyValidation,
+  sessionIdValidation,
+  twoFactorCodeValidation,
+  disableTwoFactorValidation
 };
