@@ -1,6 +1,7 @@
 const path = require('path');
 const { defineConfig } = require('vite');
 const react = require('@vitejs/plugin-react');
+const apiTarget = process.env.API_TARGET || 'http://localhost:5000';
 
 module.exports = defineConfig({
   root: path.resolve(__dirname),
@@ -8,7 +9,11 @@ module.exports = defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://localhost:5000'
+      '/api': apiTarget,
+      '/socket.io': {
+        target: apiTarget,
+        ws: true
+      }
     }
   },
   build: {

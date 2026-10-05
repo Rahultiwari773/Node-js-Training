@@ -105,6 +105,8 @@ Base URL: `http://localhost:5000/api/auth`
 | POST | `/login` | No | Return an access token and set refresh cookie; may return an MFA challenge |
 | POST | `/refresh` | Refresh cookie | Rotate refresh cookie and return a new access token |
 | GET | `/profile` | Bearer JWT | Return current user |
+| GET | `/users/accounts` | HR or Admin Bearer JWT | List accounts visible to the current manager role, with safe registration and login metadata |
+| GET | `/users/employees` | HR or Admin Bearer JWT | List employee-role accounts only |
 | GET | `/sessions` | Bearer JWT | List active devices, marking the current session |
 | DELETE | `/sessions/:id` | Bearer JWT | Revoke one device session |
 | POST | `/logout-all` | Bearer JWT | Revoke every device session |
@@ -115,7 +117,7 @@ Base URL: `http://localhost:5000/api/auth`
 | POST | `/forgot-password` | No | Send password reset token |
 | POST | `/reset-password` | No | Set a new password |
 | POST | `/logout` | Bearer JWT | Revoke the current device session |
-| POST | `/users/role` | Admin Bearer JWT | Assign `employee` or `hr` to a registered user |
+| POST | `/users/role` | HR or Admin Bearer JWT | HR can assign `employee`, `manager`, or `hr`; admins can also assign `hr_manager` and `admin`; only super admins can assign `super_admin` |
 
 ## Postman test cases
 

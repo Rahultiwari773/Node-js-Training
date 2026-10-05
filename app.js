@@ -1,6 +1,9 @@
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const path = require('path');
+const swaggerUi = require('swagger-ui-express');
+const openApiSpec = require('./docs/openapi');
+const realtimeActivity = require('./middleware/realtimeActivity');
 const employeeRoutes = require('./routes/employeeRoutes');
 const salaryRoutes = require('./routes/salaryRoutes');
 const authRoutes = require('./routes/authRoutes');
@@ -34,7 +37,24 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+app.get('/api-docs.json', (req, res) => {
+  res.json(openApiSpec);
+});
+
+app.use('/api-docs', (req, res, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+  );
+  next();
+}, swaggerUi.serve, swaggerUi.setup(openApiSpec, {
+  explorer: true,
+  customSiteTitle: 'Employee Portal API Documentation',
+  swaggerOptions: { persistAuthorization: true }
+}));
+
 app.use('/api', apiLimiter);
+app.use('/api', realtimeActivity);
 app.use('/api/employees', employeeRoutes);
 app.use('/api/salaries', salaryRoutes);
 app.use('/api/auth', authRoutes);

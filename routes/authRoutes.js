@@ -29,6 +29,18 @@ router.post('/forgot-password', authLimiter, emailValidation, validate, authCont
 router.get('/reset-password', tokenQueryValidation, validate, authController.resetPasswordPage);
 router.post('/reset-password', authLimiter, passwordValidation, validate, authController.resetPassword);
 router.get('/profile', authenticate, authController.getProfile);
+router.get(
+	'/users/accounts',
+	authenticate,
+	authorize('super_admin', 'admin', 'hr_manager', 'hr'),
+	authController.listManagedAccounts
+);
+router.get(
+	'/users/employees',
+	authenticate,
+	authorize('super_admin', 'admin', 'hr_manager', 'hr'),
+	authController.listEmployeeAccounts
+);
 router.post('/logout', authenticate, authController.logout);
 router.post('/logout-all', authenticate, authController.logoutAll);
 router.get('/sessions', authenticate, authController.listSessions);
@@ -40,7 +52,7 @@ router.post('/2fa/recovery-codes', authLimiter, authenticate, twoFactorCodeValid
 router.post(
 	'/users/role',
 	authenticate,
-	authorize('super_admin', 'admin'),
+	authorize('super_admin', 'admin', 'hr_manager', 'hr'),
 	roleValidation,
 	validate,
 	authController.assignRole

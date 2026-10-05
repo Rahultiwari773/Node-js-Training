@@ -4,6 +4,7 @@ const AppError = require('../utils/appError');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess, sendMessage } = require('../utils/response');
 const { sendAnnouncementEmails } = require('../utils/mailer');
+const { emitAnnouncementEvent } = require('../realtime/socketServer');
 const { ROLES } = require('../roles');
 
 const createAnnouncement = asyncHandler(async (req, res) => {
@@ -13,6 +14,10 @@ const createAnnouncement = asyncHandler(async (req, res) => {
     createdBy: req.user._id,
     status: req.body.status || 'published'
   });
+
+  if (announcement.status === 'published') {
+    emitAnnouncementEvent('announcement:upsert', { announcement: announcement.toObject() });
+  }
 
   if (announcement.status === 'published') {
     const users = await User.find({ email: { $exists: true, $ne: '' } }).select('name email');
@@ -50,10 +55,20 @@ const updateAnnouncement = asyncHandler(async (req, res) => {
     throw new AppError('Announcement not found', 404);
   }
 
+  const wasPublished = announcement.status === 'published';
   announcement.title = req.body.title || announcement.title;
   announcement.description = req.body.description || announcement.description;
   announcement.status = req.body.status || announcement.status;
   await announcement.save();
+
+  if (announcement.status === 'published') {
+    emitAnnouncementEvent('announcement:upsert', { announcement: announcement.toObject() });
+  } else if (wasPublished) {
+    emitAnnouncementEvent('announcement:remove', {
+      id: announcement._id.toString(),
+      title: announcement.title
+    });
+  }
 
   sendSuccess(res, announcement, 200);
 });
@@ -65,7 +80,13 @@ const deleteAnnouncement = asyncHandler(async (req, res) => {
     throw new AppError('Announcement not found', 404);
   }
 
+  const wasPublished = announcement.status === 'published';
+  const removedAnnouncement = {
+    id: announcement._id.toString(),
+    title: announcement.title
+  };
   await announcement.deleteOne();
+  if (wasPublished) emitAnnouncementEvent('announcement:remove', removedAnnouncement);
   sendMessage(res, 'Announcement deleted successfully', 200);
 });
 

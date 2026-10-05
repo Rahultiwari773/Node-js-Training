@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { io } from 'socket.io-client';
 
 let activeAccessToken = '';
 let refreshInFlight = null;
@@ -60,6 +61,7 @@ const apiRequest = async (path, token, options = {}, retryAfterRefresh = true) =
   if (!response.ok) {
     const error = new Error(payload.message || 'Request failed');
     error.payload = payload;
+    error.status = response.status;
     throw error;
   }
 
@@ -205,11 +207,11 @@ function AuthTabs({ active, onChange }) {
   return <div className="auth-tabs"><button type="button" className={active === 'login' ? 'active' : ''} onClick={() => onChange('login')}>Sign in</button><button type="button" className={active === 'register' ? 'active' : ''} onClick={() => onChange('register')}>Register</button></div>;
 }
 
-function ResponseBlock({ payload }) {
-  return <pre className="response-output">{payload ? JSON.stringify(payload, null, 2) : 'No request yet.'}</pre>;
+function ResponseBlock({ payload, requestInfo }) {
+  return <><div className="response-meta">{requestInfo ? `${requestInfo.method} ${requestInfo.path} · ${requestInfo.status}` : 'No request yet'}</div><pre className="response-output">{payload ? JSON.stringify(payload, null, 2) : 'No request yet.'}</pre></>;
 }
 
-function Dashboard({ user, token, onLogout }) {
+function Dashboard({ user, token, onLogout, onUserUpdated, initialResponse }) {
   const [employees, setEmployees] = useState([]);
   const [salaries, setSalaries] = useState([]);
   const [leaves, setLeaves] = useState([]);
@@ -217,23 +219,38 @@ function Dashboard({ user, token, onLogout }) {
   const [announcements, setAnnouncements] = useState([]);
   const [policies, setPolicies] = useState([]);
   const [documents, setDocuments] = useState([]);
+  const [employeeAccounts, setEmployeeAccounts] = useState([]);
   const [selectedEmployee, setSelectedEmployee] = useState('');
   const [files, setFiles] = useState([]);
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [response, setResponse] = useState(null);
+  const [response, setResponse] = useState(initialResponse || null);
+  const [responseInfo, setResponseInfo] = useState(null);
   const [screen, setScreen] = useState('overview');
+  const [realtimeStatus, setRealtimeStatus] = useState('connecting');
+  const [onlineCount, setOnlineCount] = useState(0);
+  const [realtimeNotice, setRealtimeNotice] = useState('');
+  const [activities, setActivities] = useState([]);
 
   const request = async (path, options = {}) => {
+    const requestInfo = {
+      method: (options.method || 'GET').toUpperCase(),
+      path,
+      status: 'pending'
+    };
+    setResponseInfo(requestInfo);
+
     try {
       const result = await apiRequest(path, token, options);
       if (options.responseType !== 'blob') setResponse(result);
+      setResponseInfo({ ...requestInfo, status: 'success' });
       setError('');
       return result;
     } catch (requestError) {
       setResponse(requestError.payload || { message: requestError.message });
+      setResponseInfo({ ...requestInfo, status: requestError.status || 'network error' });
       setError(requestError.message);
       throw requestError;
     }
@@ -270,17 +287,25 @@ function Dashboard({ user, token, onLogout }) {
     setDocuments(Array.isArray(result) ? result : []);
   };
 
+  const loadEmployeeAccounts = async () => {
+    const result = await request('/api/auth/users/accounts');
+    setEmployeeAccounts(Array.isArray(result) ? result : []);
+  };
+
+  const loadEmployees = async () => {
+    const result = await request('/api/employees');
+    setEmployees(Array.isArray(result) ? result : []);
+  };
+
+  const loadSalaries = async () => {
+    const result = await request('/api/salaries');
+    setSalaries(Array.isArray(result) ? result : []);
+  };
+
   const refresh = async () => {
     setBusy(true);
     try {
-      const results = await Promise.all([
-        request('/api/employees'),
-        request('/api/salaries')
-      ]);
-
-      const [employeeResult, salaryResult] = results;
-      setEmployees(employeeResult || []);
-      setSalaries(salaryResult || []);
+      const [employeeResult] = await Promise.all([loadEmployees(), loadSalaries()]);
 
       const nextEmployee = selectedEmployee || employeeResult?.[0]?._id || '';
       setSelectedEmployee(nextEmployee);
@@ -291,7 +316,10 @@ function Dashboard({ user, token, onLogout }) {
         loadLetters(),
         loadAnnouncements(),
         loadPolicies(),
-        loadDocuments()
+        loadDocuments(),
+        ...(['admin', 'hr', 'hr_manager', 'super_admin'].includes(user.role)
+          ? [loadEmployeeAccounts()]
+          : [])
       ]);
     } finally {
       setBusy(false);
@@ -299,6 +327,65 @@ function Dashboard({ user, token, onLogout }) {
   };
 
   useEffect(() => { refresh().catch(() => {}); }, [token]);
+
+  useEffect(() => {
+    const socket = io('/', { auth: { token: activeAccessToken || token } });
+    setRealtimeStatus('connecting');
+
+    socket.on('connect', () => setRealtimeStatus('online'));
+    const renewSocketSession = async () => {
+      try {
+        const freshToken = await refreshAccessToken();
+        socket.auth = { token: freshToken };
+        socket.connect();
+      } catch {
+        window.dispatchEvent(new Event('auth:expired'));
+      }
+    };
+
+    socket.on('disconnect', (reason) => {
+      setRealtimeStatus('offline');
+      if (reason === 'io server disconnect') renewSocketSession();
+    });
+    socket.on('connect_error', (connectionError) => {
+      setRealtimeStatus('offline');
+      if (connectionError.message.includes('authorization token')
+        || connectionError.message.includes('Session is invalid')) {
+        renewSocketSession();
+      }
+    });
+    socket.on('presence:count', ({ count }) => setOnlineCount(count));
+    socket.on('announcement:upsert', ({ announcement }) => {
+      if (!announcement) return;
+      setAnnouncements((current) => [
+        announcement,
+        ...current.filter((item) => String(item._id) !== String(announcement._id))
+      ]);
+      setRealtimeNotice(`Announcement published: ${announcement.title}`);
+    });
+    socket.on('announcement:remove', ({ id, title }) => {
+      setAnnouncements((current) => current.filter((item) => String(item._id) !== String(id)));
+      setRealtimeNotice(`Announcement removed: ${title}`);
+    });
+    socket.on('hrms:activity', (activity) => {
+      setActivities((current) => [activity, ...current].slice(0, 40));
+      setRealtimeNotice(`${activity.summary} by ${activity.performedBy}`);
+
+      const refreshers = {
+        employees: loadEmployees,
+        salaries: loadSalaries,
+        leaves: loadLeaves,
+        letters: loadLetters,
+        announcements: loadAnnouncements,
+        policies: loadPolicies,
+        documents: loadDocuments,
+        accounts: loadEmployeeAccounts
+      };
+      refreshers[activity.module]?.().catch(() => {});
+    });
+
+    return () => socket.disconnect();
+  }, [token]);
 
   const upload = async (event) => {
     event.preventDefault();
@@ -324,8 +411,10 @@ function Dashboard({ user, token, onLogout }) {
   const canManageHR = ['admin', 'hr', 'hr_manager', 'super_admin'].includes(user.role);
   const navigation = [
     ['overview', 'Overview'],
+    ...(canManageHR ? [['monitor', 'Live monitor']] : []),
     ['security', 'Security'],
     ['employees', 'Employees'],
+    ...(canManageHR ? [['employee-accounts', 'Employee accounts']] : []),
     ['salaries', 'Salaries'],
     ['files', 'File center'],
     ['documents', 'Documents'],
@@ -333,19 +422,22 @@ function Dashboard({ user, token, onLogout }) {
     ['letters', 'Letters'],
     ['announcements', 'Announcements'],
     ['policies', 'Policies'],
-    ...(user.role === 'admin' || user.role === 'super_admin' ? [['access', 'Access control']] : [])
+    ...(canManageHR ? [['access', 'Access control']] : [])
   ];
 
   return (
     <section className="workspace">
-      <div className="workspace-head"><div><p className="eyebrow">Live API workspace</p><h1>Good morning, {user.name ? user.name.split(' ')[0] : 'User'}</h1>{announcements[0] && <button type="button" className="quiet-button header-announcement" style={{ display: 'flex', alignItems: 'center', gap: 10, maxWidth: 620, marginTop: 18, padding: '10px 12px', textAlign: 'left' }} onClick={() => setScreen('announcements')}><span style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flex: '0 0 24px', background: 'var(--lime)', color: 'var(--green)', fontWeight: 700 }}>!</span><span style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}><strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>{announcements[0].title}</strong><small style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--muted)', fontSize: 11 }}>{announcements[0].description}</small></span><b style={{ marginLeft: 'auto', color: 'var(--green)', font: '10px var(--mono)', textTransform: 'uppercase' }}>View</b></button>}</div><button className="quiet-button" onClick={onLogout}>Sign out</button></div>
+      <div className="workspace-head"><div><p className="eyebrow">Live API workspace</p><h1>Good morning, {user.name ? user.name.split(' ')[0] : 'User'}</h1>{announcements[0] && <button type="button" className="quiet-button header-announcement" style={{ display: 'flex', alignItems: 'center', gap: 10, maxWidth: 620, marginTop: 18, padding: '10px 12px', textAlign: 'left' }} onClick={() => setScreen('announcements')}><span style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flex: '0 0 24px', background: 'var(--lime)', color: 'var(--green)', fontWeight: 700 }}>!</span><span style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}><strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>{announcements[0].title}</strong><small style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--muted)', fontSize: 11 }}>{announcements[0].description}</small></span><b style={{ marginLeft: 'auto', color: 'var(--green)', font: '10px var(--mono)', textTransform: 'uppercase' }}>View</b></button>}</div><div className="workspace-actions"><span className="realtime-indicator"><span className={`status-dot ${realtimeStatus === 'online' ? 'live' : ''}`} />Realtime {realtimeStatus} · {onlineCount} online</span><button className="quiet-button" onClick={onLogout}>Sign out</button></div></div>
+      {realtimeNotice && <div className="realtime-notice" role="status"><span className="panel-kicker">Live notification</span><strong>{realtimeNotice}</strong><button type="button" className="quiet-button" onClick={() => { setScreen('announcements'); setRealtimeNotice(''); }}>Open announcements</button><button type="button" className="notice-dismiss" aria-label="Dismiss notification" onClick={() => setRealtimeNotice('')}>×</button></div>}
       <div className="app-layout">
         <nav className="sidebar panel">{navigation.map(([key, label]) => <button key={key} className={`nav-item ${screen === key ? 'active' : ''}`} onClick={() => setScreen(key)}><span>{label}</span><small>{key === 'overview' ? '01' : key === 'employees' ? '02' : key === 'salaries' ? '03' : key === 'files' ? '04' : key === 'leaves' ? '05' : key === 'letters' ? '06' : key === 'announcements' ? '07' : key === 'policies' ? '08' : '09'}</small></button>)}<div className="sidebar-footer"><span className="status-dot live" />{user.role} access</div></nav>
         <div className="screen-area">
           <div className="summary-grid"><article className="summary-card accent-lime"><span>Signed-in role</span><strong>{user.role}</strong><small>{user.email}</small></article><article className="summary-card"><span>Employees visible</span><strong>{employees.length}</strong><small>GET /api/employees</small></article><article className="summary-card"><span>HR modules</span><strong>{leaves.length + letters.length + announcements.length + policies.length}</strong><small>RBAC actions</small></article></div>
-          {screen === 'overview' && <Overview employees={employees} salaries={salaries} onRefresh={refresh} busy={busy} />}
-          {screen === 'security' && <SecurityScreen user={user} request={request} onUserUpdated={setUser} />}
+          {screen === 'overview' && <Overview employees={employees} salaries={salaries} onRefresh={refresh} busy={busy} activities={activities} realtimeStatus={realtimeStatus} onlineCount={onlineCount} />}
+          {screen === 'monitor' && canManageHR && <LiveMonitor activities={activities} realtimeStatus={realtimeStatus} onlineCount={onlineCount} />}
+          {screen === 'security' && <SecurityScreen user={user} request={request} onUserUpdated={onUserUpdated} />}
           {screen === 'employees' && <EmployeeScreen employees={employees} canWrite={canWrite} request={request} refresh={refresh} />}
+          {screen === 'employee-accounts' && canManageHR && <EmployeeAccountsScreen accounts={employeeAccounts} request={request} actorRole={user.role} actorEmail={user.email} onAccountsUpdated={setEmployeeAccounts} />}
           {screen === 'salaries' && <SalaryScreen salaries={salaries} employees={employees} canWrite={canWrite} request={request} refresh={refresh} />}
           {screen === 'files' && <FileScreen employees={employees} selectedEmployee={selectedEmployee} setSelectedEmployee={setSelectedEmployee} files={files} file={file} setFile={setFile} upload={upload} loadFiles={loadFiles} busy={busy} message={message} error={error} />}
           {screen === 'documents' && <><DocumentScreen documents={documents} setDocuments={setDocuments} employees={employees} user={user} request={request} refresh={loadDocuments} /><DocumentOcrPanel documents={documents} request={request} refresh={loadDocuments} /></>}
@@ -353,8 +445,8 @@ function Dashboard({ user, token, onLogout }) {
           {screen === 'letters' && <LetterScreen letters={letters} userRole={user.role} employees={employees} request={request} refresh={loadLetters} />}
           {screen === 'announcements' && <AnnouncementScreen announcements={announcements} userRole={user.role} request={request} refresh={loadAnnouncements} />}
           {screen === 'policies' && <PolicyScreen policies={policies} userRole={user.role} request={request} refresh={loadPolicies} />}
-          {screen === 'access' && <AccessScreen request={request} />}
-          <section className="panel response-panel"><div className="panel-heading"><div><div className="panel-kicker">Last response</div><h2>API output</h2></div><button className="icon-button" onClick={() => navigator.clipboard?.writeText(JSON.stringify(response, null, 2))}>□</button></div><ResponseBlock payload={response} /></section>
+          {screen === 'access' && canManageHR && <AccessScreen request={request} actorRole={user.role} />}
+          <section className="panel response-panel"><div className="panel-heading"><div><div className="panel-kicker">Last response</div><h2>API output</h2></div><button className="icon-button" onClick={() => navigator.clipboard?.writeText(JSON.stringify(response, null, 2))}>□</button></div><ResponseBlock payload={response} requestInfo={responseInfo} /></section>
         </div>
       </div>
     </section>
@@ -1007,8 +1099,31 @@ function PolicyScreen({ policies, userRole, request, refresh }) {
   );
 }
 
-function Overview({ employees, salaries, onRefresh, busy }) {
-  return <section className="overview-grid"><div className="panel welcome-panel"><div className="panel-kicker">Operations snapshot</div><h2>Your API workspace is ready.</h2><p className="muted">Use the navigation to exercise the same role permissions your production clients will use. Every request is shown in the response inspector below.</p><button className="quiet-button" onClick={onRefresh} disabled={busy}>Refresh data ↻</button></div><div className="panel activity-panel"><div className="panel-kicker">At a glance</div><div className="metric-line"><span>Employee records</span><strong>{employees.length}</strong></div><div className="metric-line"><span>Salary records</span><strong>{salaries.length}</strong></div><div className="metric-line"><span>API status</span><strong className="healthy">Online</strong></div></div></section>;
+function Overview({ employees, salaries, onRefresh, busy, activities, realtimeStatus, onlineCount }) {
+  return <section className="overview-grid"><div className="panel welcome-panel"><div className="panel-kicker">Operations snapshot</div><h2>Your API workspace is ready.</h2><p className="muted">Use the navigation to exercise the same role permissions your production clients will use. Every request is shown in the response inspector below.</p><button className="quiet-button" onClick={onRefresh} disabled={busy}>Refresh data ↻</button></div><div className="panel activity-panel"><div className="panel-heading"><div><div className="panel-kicker">Realtime operations</div><h2>Live monitor</h2></div><span className={`realtime-pill ${realtimeStatus}`}>{realtimeStatus}</span></div><div className="metric-line"><span>Employee records</span><strong>{employees.length}</strong></div><div className="metric-line"><span>Salary records</span><strong>{salaries.length}</strong></div><div className="metric-line"><span>Accounts online</span><strong>{onlineCount}</strong></div><ActivityFeed activities={activities.slice(0, 4)} emptyMessage="Waiting for HRMS activity…" /></div></section>;
+}
+
+function LiveMonitor({ activities, realtimeStatus, onlineCount }) {
+  return <section className="panel data-panel live-monitor-panel">
+    <div className="panel-heading">
+      <div><div className="panel-kicker">Authenticated Socket.IO stream</div><h2>Live HRMS activity</h2></div>
+      <div className="monitor-status"><span className={`status-dot ${realtimeStatus === 'online' ? 'live' : ''}`} />{realtimeStatus} · {onlineCount} online</div>
+    </div>
+    <p className="muted">Successful account and HR module changes appear here while this session is connected.</p>
+    <ActivityFeed activities={activities} emptyMessage="No live activity received yet." />
+  </section>;
+}
+
+function ActivityFeed({ activities, emptyMessage }) {
+  return <div className="live-activity-list">
+    {activities.length ? activities.map((activity, index) => (
+      <article className="live-activity-row" key={`${activity.occurredAt}-${index}`}>
+        <span className={`activity-marker module-${activity.module}`} />
+        <div className="live-activity-copy"><strong>{activity.summary}</strong><span>{activity.performedBy} · {activity.actorRole}</span></div>
+        <time dateTime={activity.occurredAt}>{new Date(activity.occurredAt).toLocaleTimeString()}</time>
+      </article>
+    )) : <p className="empty-state">{emptyMessage}</p>}
+  </div>;
 }
 
 function EmployeeScreen({ employees, canWrite, request, refresh }) {
@@ -1054,11 +1169,114 @@ function FilePreview({ file }) {
   return <div className="preview-box"><div className="preview-head"><div><div className="panel-kicker">Preview</div><strong>{file.originalName}</strong></div><a href={file.downloadUrl} target="_blank" rel="noreferrer">Open full file ↗</a></div>{isImage && <img src={file.previewUrl} alt={file.originalName} />}{isPdf && <iframe title={file.originalName} src={file.previewUrl} />}{!isImage && !isPdf && <p className="muted">This document type cannot be rendered inline. Use “Open full file” to view or download it.</p>}</div>;
 }
 
-function AccessScreen({ request }) {
+function EmployeeAccountsScreen({ accounts, request, actorRole, actorEmail, onAccountsUpdated }) {
+  const [search, setSearch] = useState('');
+  const [roleDrafts, setRoleDrafts] = useState(() => Object.fromEntries(
+    accounts.map((account) => [account.email, account.role])
+  ));
+  const [savingEmail, setSavingEmail] = useState('');
+  const [notice, setNotice] = useState('');
+  const assignableRoles = actorRole === 'super_admin'
+    ? ['employee', 'manager', 'hr', 'hr_manager', 'admin', 'super_admin']
+    : actorRole === 'admin'
+      ? ['employee', 'manager', 'hr', 'hr_manager', 'admin']
+      : ['employee', 'manager', 'hr'];
+  const roleLabels = { employee: 'Employee', manager: 'Manager', hr: 'HR', hr_manager: 'HR manager', admin: 'Admin', super_admin: 'Super admin' };
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleAccounts = accounts.filter((account) => (
+    `${account.name} ${account.email}`.toLowerCase().includes(normalizedSearch)
+  ));
+
+  useEffect(() => {
+    setRoleDrafts(Object.fromEntries(accounts.map((account) => [account.email, account.role])));
+  }, [accounts]);
+
+  const assignRole = async (account) => {
+    setSavingEmail(account.email);
+    setNotice('');
+    try {
+      const result = await request('/api/auth/users/role', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: account.email, role: roleDrafts[account.email] || account.role })
+      });
+      onAccountsUpdated((current) => current.map((item) => (
+        item.email === account.email ? { ...item, role: result.user.role } : item
+      )));
+      setNotice(result.message || `Role updated to ${result.user.role}.`);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setSavingEmail('');
+    }
+  };
+
+  return (
+    <section className="panel data-panel employee-accounts-panel">
+      <div className="panel-heading">
+        <div>
+          <div className="panel-kicker">GET /api/auth/users/accounts</div>
+          <h2>Employee accounts</h2>
+        </div>
+        <span className="count-label">{accounts.length} registered</span>
+      </div>
+      <label className="account-search">Search accounts
+        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name or email" />
+      </label>
+      <div className="employee-account-list">
+        {visibleAccounts.length ? visibleAccounts.map((account) => (
+          <article className="employee-account-row" key={account._id}>
+            <div className="employee-account-identity">
+              <strong>{account.name}</strong>
+              <span>{account.email}</span>
+            </div>
+            <span className={`account-badge ${account.isEmailVerified ? 'verified' : 'pending'}`}>
+              {account.isEmailVerified ? 'Verified' : 'Unverified'}
+            </span>
+            <div className="employee-account-meta">
+              <span>Role <strong>{roleLabels[account.role] || account.role}</strong></span>
+              <span>Registered <strong>{new Date(account.createdAt).toLocaleDateString()}</strong></span>
+              <span>Last login <strong>{account.lastLoginAt ? new Date(account.lastLoginAt).toLocaleString() : 'Never'}</strong></span>
+              <span>Two-factor <strong>{account.twoFactorEnabled ? 'Enabled' : 'Disabled'}</strong></span>
+            </div>
+            <div className="employee-account-controls">
+              <label>Assign role
+                <select
+                  value={roleDrafts[account.email] || account.role}
+                  disabled={account.email.toLowerCase() === actorEmail.toLowerCase()}
+                  onChange={(event) => setRoleDrafts((current) => ({ ...current, [account.email]: event.target.value }))}
+                >
+                  {assignableRoles.map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="small-button"
+                disabled={savingEmail === account.email || account.email.toLowerCase() === actorEmail.toLowerCase()}
+                onClick={() => assignRole(account)}
+              >
+                {savingEmail === account.email ? 'Updating...' : 'Update role'}
+              </button>
+            </div>
+          </article>
+        )) : <p className="empty-state">{accounts.length ? 'No accounts match this search.' : 'No user accounts are registered yet.'}</p>}
+      </div>
+      {notice && <p className="form-message success-message" role="status">{notice}</p>}
+    </section>
+  );
+}
+
+function AccessScreen({ request, actorRole }) {
   const [form, setForm] = useState({ email: '', role: 'employee' });
   const [notice, setNotice] = useState('');
+  const assignableRoles = actorRole === 'super_admin'
+    ? ['employee', 'manager', 'hr', 'hr_manager', 'admin', 'super_admin']
+    : actorRole === 'admin'
+      ? ['employee', 'manager', 'hr', 'hr_manager', 'admin']
+      : ['employee', 'manager', 'hr'];
   const assign = async (event) => { event.preventDefault(); try { await request('/api/auth/users/role', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form) }); setNotice(`Role assigned: ${form.role}`); } catch (error) { setNotice(error.message); } };
-  return <section className="panel form-panel access-panel"><div className="panel-kicker">Admin / super-admin · POST /api/auth/users/role</div><h2>Access control</h2><p className="muted">Assign a registered user to one of the five HRMS roles. Role changes take effect on the user’s next authenticated request.</p><form onSubmit={assign}><Field label="User email" type="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} /><label>Role<select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value })}><option value="employee">Employee</option><option value="manager">Manager</option><option value="hr_manager">HR manager</option><option value="admin">Admin</option><option value="super_admin">Super admin</option></select></label><button className="primary-button">Update role <span>↗</span></button><p className="form-message success-message">{notice}</p></form></section>;
+  const roleLabels = { employee: 'Employee', manager: 'Manager', hr: 'HR', hr_manager: 'HR manager', admin: 'Admin', super_admin: 'Super admin' };
+  return <section className="panel form-panel access-panel"><div className="panel-kicker">{actorRole} · POST /api/auth/users/role</div><h2>Access control</h2><p className="muted">Assign a role to a registered user. HR can assign employee, manager, or HR roles; admin roles are restricted to administrators.</p><form onSubmit={assign}><Field label="User email" type="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} /><label>Role<select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value })}>{assignableRoles.map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}</select></label><button className="primary-button">Update role <span>↗</span></button><p className="form-message success-message">{notice}</p></form></section>;
 }
 
 function Field({ label, value, onChange, type = 'text' }) { return <label>{label}<input type={type} value={value} onChange={(event) => onChange(event.target.value)} required /></label>; }
@@ -1088,6 +1306,7 @@ export default function App() {
         if (!cancelled) {
           setToken(restoredToken);
           setUser(result.user);
+          setResponse({ success: true, data: result });
         }
       } catch {
         activeAccessToken = '';
@@ -1114,7 +1333,11 @@ export default function App() {
       activeAccessToken = result.accessToken;
       setToken(result.accessToken);
       setUser(result.user);
-      setResponse(result);
+      setResponse({
+        success: true,
+        data: { user: result.user },
+        message: 'Signed in successfully'
+      });
       setError(null);
       return result;
     } catch (loginError) {
@@ -1135,5 +1358,5 @@ export default function App() {
     setUser(null);
   };
 
-  return <><header className="topbar"><a className="brand" href="/"><span className="brand-mark">EP</span><span>Employee Portal <small>React API console</small></span></a><div className="session-state"><span className={`status-dot ${user ? 'live' : ''}`} />{user ? 'Session active' : 'Signed out'}</div></header><main>{user ? <Dashboard user={user} token={token} onLogout={logout} /> : <AuthScreen initialMode={authMode} onModeChange={setAuthMode} onLogin={login} response={response} error={error} />}</main></>;
+  return <><header className="topbar"><a className="brand" href="/"><span className="brand-mark">EP</span><span>Employee Portal <small>React API console</small></span></a><div className="session-state"><span className={`status-dot ${user ? 'live' : ''}`} />{user ? 'Session active' : 'Signed out'}</div></header><main>{user ? <Dashboard user={user} token={token} onLogout={logout} onUserUpdated={setUser} initialResponse={response} /> : <AuthScreen initialMode={authMode} onModeChange={setAuthMode} onLogin={login} response={response} error={error} />}</main></>;
 }

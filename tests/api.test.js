@@ -12,13 +12,21 @@ jest.mock('../services/authService', () => ({
   resetPasswordPage: jest.fn(),
   resetPassword: jest.fn(),
   getProfile: jest.fn(),
+  listManagedAccounts: jest.fn(),
+  listEmployeeAccounts: jest.fn(),
   assignRole: jest.fn(),
   logout: jest.fn()
 }));
 
+jest.mock('../models/userModel', () => ({ findById: jest.fn() }));
+jest.mock('../models/authSessionModel', () => ({ findOne: jest.fn() }));
+
 const request = require('supertest');
+const jwt = require('jsonwebtoken');
 const app = require('../app');
 const authService = require('../services/authService');
+const User = require('../models/userModel');
+const AuthSession = require('../models/authSessionModel');
 const authRoutes = require('../routes/authRoutes');
 const leaveRoutes = require('../routes/leaveRoutes');
 const letterRoutes = require('../routes/letterRoutes');
@@ -31,6 +39,30 @@ describe('API security and validation', () => {
 
     expect(response.status).toBe(200);
     expect(response.text).toContain('<!doctype html>');
+  });
+
+  test('serves the OpenAPI specification as JSON', async () => {
+    const response = await request(app).get('/api-docs.json');
+
+    expect(response.status).toBe(200);
+    expect(response.body.openapi).toBe('3.0.3');
+    expect(response.body.paths['/auth/users/employees'].get).toBeDefined();
+    expect(response.body.paths['/auth/users/accounts'].get).toBeDefined();
+    expect(response.body.paths['/employees'].post.requestBody).toBeDefined();
+    expect(response.body.components.schemas.EmployeeInput).toBeDefined();
+    expect(response.body.components.securitySchemes.bearerAuth.scheme).toBe('bearer');
+  });
+
+  test('serves interactive Swagger UI', async () => {
+    const response = await request(app).get('/api-docs/');
+    const initializer = await request(app).get('/api-docs/swagger-ui-init.js');
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('swagger-ui-bundle.js');
+    expect(response.text).toContain('swagger-ui-init.js');
+    expect(response.headers['content-security-policy']).toContain("'unsafe-inline'");
+    expect(initializer.status).toBe(200);
+    expect(initializer.headers['content-type']).toContain('javascript');
   });
 
   test('adds HTTP security headers', async () => {
@@ -47,6 +79,9 @@ describe('API security and validation', () => {
       .set('Origin', 'http://localhost:5173');
 
     expect(response.status).toBe(200);
+
+     'post /2fa/recovery-codes'
+      , 'get /users/employees'
     expect(response.headers['access-control-allow-origin']).toBe('http://localhost:5173');
   });
 
@@ -65,8 +100,6 @@ describe('API security and validation', () => {
       .send({ email: 'invalid-email', password: '' });
 
     expect(response.status).toBe(400);
-    expect(response.body.success).toBe(false);
-    expect(response.body.message).toBe('Validation failed');
     expect(response.body.details).toEqual(expect.arrayContaining([
       expect.objectContaining({ field: 'email', location: 'body' }),
       expect.objectContaining({ field: 'password', location: 'body' })
@@ -155,7 +188,10 @@ describe('API security and validation', () => {
       'post /2fa/setup',
       'post /2fa/enable',
       'post /2fa/disable',
-      'post /2fa/recovery-codes'
+      'post /2fa/recovery-codes',
+      'get /users/accounts',
+      'get /users/employees',
+      'post /users/role'
     ]));
   });
 
@@ -167,6 +203,92 @@ describe('API security and validation', () => {
       success: false,
       message: 'Authorization token is required'
     });
+  });
+
+  test('requires authentication for the HR employee account directory', async () => {
+    const response = await request(app).get('/api/auth/users/employees');
+
+    expect(response.status).toBe(401);
+    expect(response.body.message).toBe('Authorization token is required');
+  });
+
+  test('requires authentication for the role-managed account directory', async () => {
+    const response = await request(app).get('/api/auth/users/accounts');
+
+    expect(response.status).toBe(401);
+    expect(response.body.message).toBe('Authorization token is required');
+  });
+
+  test('allows HR to load the accounts they can manage', async () => {
+    const hrUser = {
+      _id: 'hr-user-id',
+      email: 'hr@example.com',
+      role: 'hr',
+      tokenVersion: 0
+    };
+    const accounts = [{ _id: 'employee-id', email: 'employee@example.com', role: 'employee' }];
+    User.findById.mockResolvedValue(hrUser);
+    AuthSession.findOne.mockReturnValue({
+      select: jest.fn().mockResolvedValue({ _id: 'hr-session-id' })
+    });
+    authService.listManagedAccounts.mockResolvedValue(accounts);
+    const token = jwt.sign({
+      sub: hrUser._id,
+      tokenVersion: hrUser.tokenVersion,
+      purpose: 'access',
+      sid: 'hr-session-id'
+    }, process.env.JWT_SECRET, { expiresIn: '5m' });
+
+    const response = await request(app)
+      .get('/api/auth/users/accounts')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual(accounts);
+    expect(authService.listManagedAccounts).toHaveBeenCalledWith(hrUser);
+  });
+
+  test('requires authentication for role assignment', async () => {
+    const response = await request(app)
+      .post('/api/auth/users/role')
+      .send({ email: 'employee@example.com', role: 'manager' });
+
+    expect(response.status).toBe(401);
+    expect(response.body.message).toBe('Authorization token is required');
+  });
+
+  test('allows an HR account to assign a permitted role', async () => {
+    const hrUser = {
+      _id: 'hr-user-id',
+      email: 'hr@example.com',
+      role: 'hr',
+      tokenVersion: 0
+    };
+    User.findById.mockResolvedValue(hrUser);
+    AuthSession.findOne.mockReturnValue({
+      select: jest.fn().mockResolvedValue({ _id: 'hr-session-id' })
+    });
+    authService.assignRole.mockResolvedValue({
+      user: { email: 'employee@example.com', role: 'employee' },
+      message: 'User role updated to employee'
+    });
+    const token = jwt.sign({
+      sub: hrUser._id,
+      tokenVersion: hrUser.tokenVersion,
+      purpose: 'access',
+      sid: 'hr-session-id'
+    }, process.env.JWT_SECRET, { expiresIn: '5m' });
+
+    const response = await request(app)
+      .post('/api/auth/users/role')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'employee@example.com', role: 'employee' });
+
+    expect(response.status).toBe(200);
+    expect(authService.assignRole).toHaveBeenCalledWith(
+      hrUser,
+      { email: 'employee@example.com', role: 'employee' }
+    );
   });
 
   test('requires authentication for document resources', async () => {

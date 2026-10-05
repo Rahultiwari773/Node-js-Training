@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const Employee = require('../models/employeeModel');
 const AppError = require('../utils/appError');
+const { redisClient } = require('../utils/redisClient');
 const {
   deleteStoredFile,
   getStoredFilePath,
@@ -15,11 +16,67 @@ const validateId = (id) => {
 
 const canAccessAllEmployees = (user) => ['super_admin', 'admin', 'hr_manager', 'hr'].includes(user.role);
 
+const EMPLOYEE_LIST_CACHE_PREFIX = 'employees:list:';
+const EMPLOYEE_LIST_CACHE_TTL_SECONDS = 60;
+
+const getEmployeeListCacheKey = (user) => (
+  canAccessAllEmployees(user)
+    ? `${EMPLOYEE_LIST_CACHE_PREFIX}all`
+    : `${EMPLOYEE_LIST_CACHE_PREFIX}user:${encodeURIComponent(String(user.email || '').toLowerCase())}`
+);
+
+const invalidateEmployeeListCache = async () => {
+  if (!redisClient.isReady) return;
+
+  try {
+    for await (const page of redisClient.scanIterator({
+      MATCH: `${EMPLOYEE_LIST_CACHE_PREFIX}*`,
+      COUNT: 100
+    })) {
+      const keys = Array.isArray(page) ? page : [page];
+      if (keys.length) await redisClient.del(keys);
+    }
+  } catch (error) {
+    console.error('Employee cache invalidation failed:', error.message);
+  }
+};
+
 const employeeAccessFilter = (user) => (canAccessAllEmployees(user)
   ? {}
   : { email: user.email });
 
-const getEmployees = (user) => Employee.find(employeeAccessFilter(user)).sort({ createdAt: -1 });
+const getEmployees = async (user) => {
+  const cacheKey = getEmployeeListCacheKey(user);
+
+  if (redisClient.isReady) {
+    try {
+      const cachedEmployees = await redisClient.get(cacheKey);
+      if (cachedEmployees !== null) {
+        console.log(`Employee cache HIT: ${cacheKey}`);
+        return JSON.parse(cachedEmployees);
+      }
+    } catch (error) {
+      console.error('Employee cache read failed:', error.message);
+    }
+  }
+
+  console.log(`Employee cache MISS: ${cacheKey}`);
+  const employees = await Employee.find(employeeAccessFilter(user)).sort({ createdAt: -1 });
+
+  if (redisClient.isReady) {
+    try {
+      await redisClient.set(
+        cacheKey,
+        JSON.stringify(employees),
+        { EX: EMPLOYEE_LIST_CACHE_TTL_SECONDS }
+      );
+    } catch (error) {
+      console.error('Employee cache write failed:', error.message);
+    }
+  }
+
+  return employees;
+};
 
 const getEmployeeById = async (id, user) => {
   validateId(id);
@@ -32,10 +89,12 @@ const getEmployeeById = async (id, user) => {
   return employee;
 };
 
-const createEmployee = (data, user) => {
+const createEmployee = async (data, user) => {
   const employeeData = { ...data, createdBy: user._id };
   delete employeeData.files;
-  return Employee.create(employeeData);
+  const employee = await Employee.create(employeeData);
+  await invalidateEmployeeListCache();
+  return employee;
 };
 
 const updateEmployee = async (id, data, user) => {
@@ -57,6 +116,7 @@ const updateEmployee = async (id, data, user) => {
     throw new AppError('Employee not found', 404);
   }
 
+  await invalidateEmployeeListCache();
   return employee;
 };
 
@@ -71,6 +131,7 @@ const deleteEmployee = async (id, user) => {
     throw new AppError('Employee not found', 404);
   }
 
+  await invalidateEmployeeListCache();
   employee.files.forEach((file) => deleteStoredFile(file.storedName));
 };
 
@@ -112,6 +173,8 @@ const addEmployeeFile = async (id, user, file) => {
     deleteStoredFile(file.filename);
     throw error;
   }
+
+  await invalidateEmployeeListCache();
 
   const uploadedFile = employee.files[employee.files.length - 1];
   return {
@@ -158,6 +221,7 @@ const deleteEmployeeFile = async (id, fileId, user) => {
   const storedName = file.storedName;
   file.deleteOne();
   await employee.save();
+  await invalidateEmployeeListCache();
   deleteStoredFile(storedName);
 };
 

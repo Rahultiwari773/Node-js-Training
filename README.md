@@ -11,6 +11,8 @@ npm run dev
 
 The backend runs at `http://localhost:5000`.
 
+Interactive API reference: `http://localhost:5000/api-docs/`. The raw OpenAPI 3 specification is available at `http://localhost:5000/api-docs.json`.
+
 ## Run the React frontend
 
 In a second terminal:
@@ -30,7 +32,23 @@ npm start
 
 ## Environment
 
-Copy `.env.example` to `.env` and configure `MONGO_URI`, `JWT_SECRET`, and `CORS_ORIGINS`. Never commit `.env`.
+Copy `.env.example` to `.env` and configure `MONGO_URI`, `JWT_SECRET`, and `CORS_ORIGINS`. Start Redis locally or set `REDIS_URL` to your Redis server. Never commit `.env`.
+
+## Redis employee cache
+
+`GET /api/employees` uses the cache-aside pattern. The service checks Redis first; a hit returns the cached list, while a miss queries MongoDB and stores the result in Redis for 60 seconds. Cache keys separate users with restricted employee visibility from roles that can see every employee. Creating, updating, or deleting an employee clears employee-list cache keys. The server logs cache hits and misses and continues to serve requests from MongoDB if Redis is unavailable.
+
+Authentication sessions are still stored in MongoDB (`auth_sessions`) so refresh-token rotation, revocation, and expiry remain durable. Redis is used for employee response caching, not as the authentication session store.
+
+## Employee account visibility
+
+HR, HR managers, admins, and super admins can open **Employee accounts** in the dashboard. The protected `GET /api/auth/users/accounts` endpoint lists accounts the current role may manage, with registration date, email verification, two-factor status, and last successful login. HR can change roles directly in each row; assigned HR and manager accounts remain in the list. Passwords, tokens, and authentication secrets are never returned. Accounts created before last-login tracking was added show `Never` until their next successful sign-in.
+
+## Real-time updates
+
+The backend uses Socket.IO with the same access-token, token-version, and active-session checks as the REST API. Connected clients receive a distinct online-account count and live updates when a published announcement is created, edited, unpublished, or deleted. Draft announcement content is not broadcast. HR, HR managers, admins, and super admins also have a **Live monitor** screen that receives successful employee, salary, leave, letter, policy, document, account, and announcement activity and refreshes the affected dashboard data. Activity messages contain a summary, actor name/role, and timestamp only; the feed lives in browser memory and is not an audit log.
+
+To try it locally, run both `npm run dev` and `npm run frontend:dev`, sign in from two browser windows, and publish an announcement from one window. The other window updates immediately and displays a notification. The dashboard also shows the realtime connection state and current online count. If the backend uses a port other than 5000, set `API_TARGET` to its URL before starting Vite (for example, `http://localhost:5001`).
 
 ## Main features
 

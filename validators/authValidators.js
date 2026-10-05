@@ -27,7 +27,8 @@ const passwordValidation = [
 
 const roleValidation = [
   email(),
-  body('role').isIn(['employee', 'hr']).withMessage('Role must be employee or hr')
+  body('role').isIn(['employee', 'manager', 'hr', 'hr_manager', 'admin', 'super_admin'])
+    .withMessage('Invalid role')
 ];
 
 const tokenQueryValidation = [

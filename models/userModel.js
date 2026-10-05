@@ -33,6 +33,10 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false
     },
+    lastLoginAt: {
+      type: Date,
+      default: null
+    },
     emailVerificationTokenHash: {
       type: String,
       select: false

@@ -6,7 +6,9 @@ const bcrypt = require('bcryptjs');
 
 jest.mock('../models/userModel', () => ({
   findById: jest.fn(),
-  findOne: jest.fn()
+  findOne: jest.fn(),
+  findOneAndUpdate: jest.fn(),
+  find: jest.fn()
 }));
 
 jest.mock('../models/authSessionModel', () => ({
@@ -156,8 +158,81 @@ describe('auth refresh sessions', () => {
 
     expect(currentUser.twoFactorRecoveryCodeHashes).toEqual([]);
     expect(currentUser.save).toHaveBeenCalled();
+    expect(currentUser.lastLoginAt).toBeInstanceOf(Date);
     expect(AuthSession.create).toHaveBeenCalledWith(expect.objectContaining({ userId: userId }));
     expect(result.accessToken).toEqual(expect.any(String));
     expect(result.refreshToken).toEqual(expect.any(String));
+  });
+
+  test('lists employee account fields without selecting credentials or secrets', async () => {
+    const accounts = [{ name: 'Employee', email: 'employee@example.com' }];
+    const query = {
+      select: jest.fn(),
+      sort: jest.fn(),
+      lean: jest.fn().mockResolvedValue(accounts)
+    };
+    query.select.mockReturnValue(query);
+    query.sort.mockReturnValue(query);
+    User.find.mockReturnValue(query);
+
+    await expect(authService.listEmployeeAccounts()).resolves.toBe(accounts);
+
+    expect(User.find).toHaveBeenCalledWith({ role: 'employee' });
+    expect(query.select).toHaveBeenCalledWith(
+      'name email role isEmailVerified twoFactorEnabled createdAt lastLoginAt'
+    );
+    expect(query.sort).toHaveBeenCalledWith({ createdAt: -1 });
+  });
+
+  test('lists accounts within the HR role-management scope', async () => {
+    const accounts = [{ name: 'Employee', email: 'employee@example.com', role: 'employee' }];
+    const query = {
+      select: jest.fn(),
+      sort: jest.fn(),
+      lean: jest.fn().mockResolvedValue(accounts)
+    };
+    query.select.mockReturnValue(query);
+    query.sort.mockReturnValue(query);
+    User.find.mockReturnValue(query);
+
+    await expect(authService.listManagedAccounts({ role: 'hr' })).resolves.toBe(accounts);
+
+    expect(User.find).toHaveBeenCalledWith({ role: { $in: ['employee', 'manager', 'hr'] } });
+    expect(query.select).toHaveBeenCalledWith(
+      'name email role isEmailVerified twoFactorEnabled createdAt lastLoginAt'
+    );
+  });
+
+  test('allows HR to assign permitted roles to another account', async () => {
+    const updatedUser = {
+      _id: userId,
+      name: 'Manager Example',
+      email: 'manager@example.com',
+      role: 'manager',
+      isEmailVerified: true,
+      twoFactorEnabled: false,
+      createdAt: new Date()
+    };
+    User.findOneAndUpdate.mockResolvedValue(updatedUser);
+
+    await expect(authService.assignRole(
+      { email: 'hr@example.com', role: 'hr' },
+      { email: updatedUser.email, role: 'manager' }
+    )).resolves.toMatchObject({ user: { role: 'manager' } });
+
+    expect(User.findOneAndUpdate).toHaveBeenCalledWith(
+      { email: updatedUser.email },
+      { role: 'manager' },
+      { new: true, runValidators: true }
+    );
+  });
+
+  test('prevents HR from granting administrator roles', async () => {
+    await expect(authService.assignRole(
+      { email: 'hr@example.com', role: 'hr' },
+      { email: 'new-admin@example.com', role: 'admin' }
+    )).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(User.findOneAndUpdate).not.toHaveBeenCalled();
   });
 });

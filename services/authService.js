@@ -183,10 +183,30 @@ const login = async (input = {}, metadata = {}) => {
     await user.save();
   }
 
+  const credentials = await createSessionCredentials(user, metadata);
+  user.lastLoginAt = new Date();
+  await user.save();
+
   return {
-    ...(await createSessionCredentials(user, metadata)),
+    ...credentials,
     user: publicUser(user)
   };
+};
+
+const listEmployeeAccounts = () => User.find({ role: 'employee' })
+  .select('name email role isEmailVerified twoFactorEnabled createdAt lastLoginAt')
+  .sort({ createdAt: -1 })
+  .lean();
+
+const listManagedAccounts = (viewer) => {
+  const query = ['admin', 'super_admin'].includes(viewer.role)
+    ? {}
+    : { role: { $in: ['employee', 'manager', 'hr'] } };
+
+  return User.find(query)
+    .select('name email role isEmailVerified twoFactorEnabled createdAt lastLoginAt')
+    .sort({ createdAt: -1 })
+    .lean();
 };
 
 const refreshSession = async (refreshToken) => {
@@ -399,12 +419,23 @@ const assignRole = async (adminUser, input = {}) => {
     throw new AppError('A valid user email is required', 400);
   }
 
-  if (!['super_admin', 'admin', 'hr_manager', 'manager', 'employee'].includes(role)) {
-    throw new AppError('Role must be super_admin, admin, hr_manager, manager, or employee', 400);
+  const knownRoles = ['employee', 'manager', 'hr', 'hr_manager', 'admin', 'super_admin'];
+  if (!knownRoles.includes(role)) {
+    throw new AppError('Invalid role', 400);
   }
 
-  if (adminUser.email === email) {
-    throw new AppError('An admin cannot change their own role', 400);
+  if (normalizeEmail(adminUser.email) === email) {
+    throw new AppError('You cannot change your own role', 400);
+  }
+
+  const assignableRoles = adminUser.role === 'super_admin'
+    ? knownRoles
+    : adminUser.role === 'admin'
+      ? ['employee', 'manager', 'hr', 'hr_manager', 'admin']
+      : ['employee', 'manager', 'hr'];
+
+  if (!assignableRoles.includes(role)) {
+    throw new AppError('Your role is not allowed to assign this role', 403);
   }
 
   const user = await User.findOneAndUpdate(
@@ -479,6 +510,8 @@ module.exports = {
   login,
   refreshSession,
   getProfile,
+  listEmployeeAccounts,
+  listManagedAccounts,
   listSessions,
   revokeSession,
   logoutAll,

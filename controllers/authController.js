@@ -23,6 +23,7 @@ const sendTokenResponse = (res, result, statusCode = 200) => {
 
 const register = asyncHandler(async (req, res) => {
   const result = await authService.register(req.body || {});
+  req.realtimeActor = result.user;
   sendSuccess(res, result, 201);
 });
 
@@ -42,6 +43,7 @@ const login = asyncHandler(async (req, res) => {
     ipAddress: req.ip
   });
   if (result.requiresTwoFactor) return sendSuccess(res, result);
+  req.realtimeActor = result.user;
   sendTokenResponse(res, result);
 });
 
@@ -59,6 +61,16 @@ const refresh = asyncHandler(async (req, res) => {
 
 const getProfile = asyncHandler(async (req, res) => {
   sendSuccess(res, { user: authService.getProfile(req.user) });
+});
+
+const listEmployeeAccounts = asyncHandler(async (req, res) => {
+  const users = await authService.listEmployeeAccounts();
+  sendSuccess(res, users);
+});
+
+const listManagedAccounts = asyncHandler(async (req, res) => {
+  const users = await authService.listManagedAccounts(req.user);
+  sendSuccess(res, users);
 });
 
 const assignRole = asyncHandler(async (req, res) => {
@@ -181,6 +193,8 @@ module.exports = {
   login,
   refresh,
   getProfile,
+  listEmployeeAccounts,
+  listManagedAccounts,
   assignRole,
   forgotPassword,
   resetPasswordPage,
