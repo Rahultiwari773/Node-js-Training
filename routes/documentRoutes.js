@@ -7,6 +7,10 @@ const { uploadDocument, validateDocumentRequest } = require('../middleware/docum
 const { ROLES } = require('../roles');
 const {
   uploadDocumentFile,
+  initiateChunkedDocumentUpload,
+  uploadDocumentChunk,
+  completeChunkedDocumentUpload,
+  cancelChunkedDocumentUpload,
   getDocuments,
   getDocumentById,
   extractDocumentOcr,
@@ -17,7 +21,9 @@ const {
 const {
   uploadDocumentValidation,
   listDocumentsValidation,
-  updateDocumentValidation
+  updateDocumentValidation,
+  initiateChunkedUploadValidation,
+  chunkedUploadIdValidation
 } = require('../validators/documentValidators');
 
 const router = express.Router();
@@ -34,6 +40,37 @@ router.post(
   uploadDocumentValidation,
   validateDocumentRequest,
   uploadDocumentFile
+);
+
+router.post(
+  '/uploads',
+  authorize(...managementRoles, ROLES.EMPLOYEE),
+  uploadLimiter,
+  initiateChunkedUploadValidation,
+  validate,
+  initiateChunkedDocumentUpload
+);
+
+router.put(
+  '/uploads/:uploadId/chunks/:chunkIndex',
+  uploadLimiter,
+  chunkedUploadIdValidation,
+  validate,
+  uploadDocumentChunk
+);
+
+router.post(
+  '/uploads/:uploadId/complete',
+  chunkedUploadIdValidation,
+  validate,
+  completeChunkedDocumentUpload
+);
+
+router.delete(
+  '/uploads/:uploadId',
+  chunkedUploadIdValidation,
+  validate,
+  cancelChunkedDocumentUpload
 );
 
 router.get(

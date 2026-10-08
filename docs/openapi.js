@@ -187,6 +187,12 @@ addEndpoint('/policies/{id}', 'delete', policyTag, 'Delete a policy', { response
 
 const documentTag = 'Documents';
 addEndpoint('/documents/upload', 'post', documentTag, 'Upload and process a document', { body: 'DocumentUpload', contentType: 'multipart/form-data', response: 'Document', status: 201 });
+addEndpoint('/documents/uploads', 'post', documentTag, 'Start a resumable chunked document upload', {
+  body: 'ChunkedUploadRequest',
+  response: 'ChunkedUploadStarted',
+  status: 201,
+  description: 'Uploads are split into sequentially numbered 1 MiB chunks. Sessions expire after 24 hours.'
+});
 addEndpoint('/documents', 'get', documentTag, 'List and filter documents', {
   responseArray: 'Document',
   pagination: true,
@@ -204,6 +210,61 @@ addEndpoint('/documents/{id}/preview', 'get', documentTag, 'Preview a document f
 addEndpoint('/documents/{id}/ocr', 'post', documentTag, 'Run OCR on a stored document', { response: 'Document', message: true });
 addEndpoint('/documents/{id}', 'put', documentTag, 'Update document metadata or replace its file', { body: 'DocumentUpdate', contentType: 'multipart/form-data', response: 'Document', message: true });
 addEndpoint('/documents/{id}', 'delete', documentTag, 'Delete a document and its file', { response: 'message' });
+
+paths['/documents/uploads/{uploadId}/chunks/{chunkIndex}'] = {
+  put: {
+    tags: [documentTag],
+    summary: 'Upload one binary chunk',
+    operationId: 'put_documents_uploads_uploadId_chunks_chunkIndex',
+    security: [{ bearerAuth: [] }],
+    parameters: [
+      { name: 'uploadId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+      { name: 'chunkIndex', in: 'path', required: true, schema: { type: 'integer', minimum: 0 } }
+    ],
+    requestBody: {
+      required: true,
+      content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } }
+    },
+    responses: {
+      '200': { description: 'Chunk saved', content: { 'application/json': { schema: { type: 'object', additionalProperties: true } } } },
+      '400': { description: 'Invalid chunk or chunk size' },
+      '401': { description: 'Authentication required' },
+      '404': { description: 'Upload session not found' },
+      '409': { description: 'Chunk already uploaded or session is finalizing' }
+    }
+  }
+};
+paths['/documents/uploads/{uploadId}/complete'] = {
+  post: {
+    tags: [documentTag],
+    summary: 'Assemble and save the uploaded document',
+    operationId: 'post_documents_uploads_uploadId_complete',
+    security: [{ bearerAuth: [] }],
+    parameters: [{ name: 'uploadId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+    responses: {
+      '201': { description: 'Document assembled and saved', content: { 'application/json': { schema: successSchema(reference('Document')) } } },
+      '400': { description: 'Upload is incomplete or file is invalid' },
+      '401': { description: 'Authentication required' },
+      '404': { description: 'Upload session not found' },
+      '409': { description: 'Upload is already being finalized' }
+    }
+  }
+};
+paths['/documents/uploads/{uploadId}'] = {
+  delete: {
+    tags: [documentTag],
+    summary: 'Cancel a chunked upload and discard its chunks',
+    operationId: 'delete_documents_uploads_uploadId',
+    security: [{ bearerAuth: [] }],
+    parameters: [{ name: 'uploadId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+    responses: {
+      '200': { description: 'Upload cancelled', content: { 'application/json': { schema: messageSchema } } },
+      '401': { description: 'Authentication required' },
+      '404': { description: 'Upload session not found' },
+      '409': { description: 'Upload is being finalized' }
+    }
+  }
+};
 
 module.exports = {
   openapi: '3.0.3',
@@ -461,6 +522,35 @@ module.exports = {
         type: 'object', required: ['file', 'employeeId', 'documentType'], properties: {
           file: { type: 'string', format: 'binary' }, employeeId: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' },
           documentType: { type: 'string', enum: ['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'] }
+        }
+      },
+      ChunkedUploadRequest: {
+        type: 'object',
+        required: ['employeeId', 'documentType', 'originalFileName', 'mimeType', 'fileSize'],
+        properties: {
+          employeeId: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' },
+          documentType: { type: 'string', enum: ['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'] },
+          originalFileName: { type: 'string', minLength: 1, maxLength: 255 },
+          mimeType: { type: 'string', enum: ['application/pdf', 'image/jpeg', 'image/png'] },
+          fileSize: { type: 'integer', minimum: 1, maximum: 5242880 }
+        }
+      },
+      ChunkedUploadStarted: {
+        type: 'object',
+        required: ['success', 'data'],
+        properties: {
+          success: { type: 'boolean', example: true },
+          message: { type: 'string' },
+          data: {
+            type: 'object',
+            required: ['uploadId', 'chunkSize', 'totalChunks', 'expiresAt'],
+            properties: {
+              uploadId: { type: 'string', format: 'uuid' },
+              chunkSize: { type: 'integer', example: 1048576 },
+              totalChunks: { type: 'integer' },
+              expiresAt: { type: 'string', format: 'date-time' }
+            }
+          }
         }
       },
       DocumentUpdate: {

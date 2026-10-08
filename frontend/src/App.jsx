@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 
 let activeAccessToken = '';
@@ -692,32 +692,104 @@ function DocumentScreen({ documents, setDocuments, employees, user, request, ref
   const [filters, setFilters] = useState({ documentType: '', status: '', search: '' });
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const uploadController = useRef(null);
   const canUpload = ['super_admin', 'admin', 'hr_manager', 'hr', 'employee'].includes(user.role);
   const canDelete = canUpload;
 
   const submit = async (event) => {
     event.preventDefault();
-    if (!file) {
+    if (!form.employeeId || !file) {
+      setNotice('Choose an employee and a document before uploading.');
+      return;
+    }
+    if (file.size < 1 || file.size > 5 * 1024 * 1024) {
+      setNotice('Choose a file between 1 byte and 5 MB.');
+      return;
+    }
+
+    const extension = file.name.split('.').pop().toLowerCase();
+    const mimeTypeByExtension = {
+      pdf: 'application/pdf',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      png: 'image/png'
+    };
+    const mimeType = mimeTypeByExtension[extension];
+    if (!mimeType) {
       setNotice('Choose a PDF, JPG, JPEG, or PNG file.');
       return;
     }
 
-    const body = new FormData();
-    body.append('employeeId', form.employeeId);
-    body.append('documentType', form.documentType);
-    body.append('file', file);
+    const controller = new AbortController();
+    uploadController.current = controller;
+    let uploadId = null;
     setBusy(true);
+    setNotice('');
+    setUploadProgress({ sent: 0, total: file.size, phase: 'starting' });
+
     try {
-      await request('/api/documents/upload', { method: 'POST', body });
+      const upload = await request('/api/documents/uploads', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: form.employeeId,
+          documentType: form.documentType,
+          originalFileName: file.name,
+          mimeType,
+          fileSize: file.size
+        }),
+        signal: controller.signal
+      });
+      uploadId = upload.uploadId;
+      setUploadProgress({ sent: 0, total: file.size, phase: 'uploading' });
+
+      for (let chunkIndex = 0; chunkIndex < upload.totalChunks; chunkIndex += 1) {
+        const start = chunkIndex * upload.chunkSize;
+        const chunk = file.slice(start, Math.min(start + upload.chunkSize, file.size));
+        await request(`/api/documents/uploads/${uploadId}/chunks/${chunkIndex}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: chunk,
+          signal: controller.signal
+        });
+        setUploadProgress({
+          sent: Math.min(start + chunk.size, file.size),
+          total: file.size,
+          phase: 'uploading'
+        });
+      }
+
+      setUploadProgress({ sent: file.size, total: file.size, phase: 'finalizing' });
+      await request(`/api/documents/uploads/${uploadId}/complete`, { method: 'POST' });
       setNotice('Document uploaded successfully.');
       setFile(null);
       event.target.reset();
       await refresh();
     } catch (error) {
-      setNotice(error.message);
+      let cleanupFailed = false;
+      if (uploadId) {
+        try {
+          await request(`/api/documents/uploads/${uploadId}`, { method: 'DELETE' });
+        } catch (cleanupError) {
+          if (cleanupError.status !== 409 && cleanupError.status !== 404) {
+            cleanupFailed = true;
+          }
+        }
+      }
+      const message = error.name === 'AbortError' ? 'Upload cancelled.' : error.message;
+      setNotice(cleanupFailed
+        ? `${message} The upload session could not be cleaned up and will expire automatically.`
+        : message);
     } finally {
+      uploadController.current = null;
+      setUploadProgress(null);
       setBusy(false);
     }
+  };
+
+  const cancelUpload = () => {
+    uploadController.current?.abort();
   };
 
   const applyFilters = async (event) => {
@@ -764,7 +836,81 @@ function DocumentScreen({ documents, setDocuments, employees, user, request, ref
     }
   };
 
-  return <div className="screen-grid document-screen"><section className="panel data-panel"><div className="panel-heading"><div><div className="panel-kicker">Employee documents</div><h2>Document center</h2></div><span className="count-label">{documents.length} visible</span></div><form className="document-filters" onSubmit={applyFilters}><input value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} placeholder="Search filename" /><select value={filters.documentType} onChange={(event) => setFilters({ ...filters, documentType: event.target.value })}><option value="">All types</option>{['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'].map((type) => <option key={type} value={type}>{type}</option>)}</select><select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}><option value="">All status</option><option value="active">Active</option><option value="archived">Archived</option></select><button type="submit" className="small-button" disabled={busy}>Filter</button></form><div className="resource-view module-list">{documents.length ? documents.map((item) => <div className="record" key={item._id}><div><strong>{item.documentType}</strong><br /><span>{item.originalFileName}</span></div><span className="record-badge">{item.status}</span><small>{item.mimeType} · {(item.fileSize / 1024).toFixed(1)} KB · Employee {item.employeeId}</small><div className="inline-actions">{canDelete && <button type="button" className="small-button" disabled={busy} onClick={() => updateStatus(item._id, item.status === 'active' ? 'archived' : 'active')}>{item.status === 'active' ? 'Archive' : 'Restore'}</button>}{canDelete && <button type="button" className="small-button danger" disabled={busy} onClick={() => remove(item._id)}>Delete</button>}</div></div>) : <p className="empty-state">No documents available for this role or filter.</p>}</div><p className="form-message success-message">{notice}</p></section>{canUpload && <form className="panel form-panel" onSubmit={submit}><div className="panel-kicker">POST /api/documents/upload</div><h2>Upload document</h2><label>Employee<select value={form.employeeId} onChange={(event) => setForm({ ...form, employeeId: event.target.value })} required><option value="">Choose employee</option>{employees.map((employee) => <option key={employee._id} value={employee._id}>{employee.name} · {employee.email}</option>)}</select></label><label>Document type<select value={form.documentType} onChange={(event) => setForm({ ...form, documentType: event.target.value })}>{['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'].map((type) => <option key={type} value={type}>{type}</option>)}</select></label><label className="file-picker"><span className="upload-icon">↑</span><strong>{file?.name || 'Choose a document'}</strong><small>PDF, JPG, JPEG, PNG · max 5 MB</small><input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(event) => setFile(event.target.files[0] || null)} required /></label><button className="primary-button" disabled={busy || !form.employeeId || !file}>{busy ? 'Uploading...' : 'Upload document'} <span>↑</span></button><p className="form-message success-message">{notice}</p></form>}</div>;
+  return (
+    <div className="screen-grid document-screen">
+      <section className="panel data-panel">
+        <div className="panel-heading">
+          <div><div className="panel-kicker">Employee documents</div><h2>Document center</h2></div>
+          <span className="count-label">{documents.length} visible</span>
+        </div>
+        <form className="document-filters" onSubmit={applyFilters}>
+          <input value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} placeholder="Search filename" />
+          <select value={filters.documentType} onChange={(event) => setFilters({ ...filters, documentType: event.target.value })}>
+            <option value="">All types</option>
+            {['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'].map((type) => <option key={type} value={type}>{type}</option>)}
+          </select>
+          <select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
+            <option value="">All status</option><option value="active">Active</option><option value="archived">Archived</option>
+          </select>
+          <button type="submit" className="small-button" disabled={busy}>Filter</button>
+        </form>
+        <div className="resource-view module-list">
+          {documents.length ? documents.map((item) => (
+            <div className="record" key={item._id}>
+              <div><strong>{item.documentType}</strong><br /><span>{item.originalFileName}</span></div>
+              <span className="record-badge">{item.status}</span>
+              <small>{item.mimeType} · {(item.fileSize / 1024).toFixed(1)} KB · Employee {item.employeeId}</small>
+              <div className="inline-actions">
+                {canDelete && <button type="button" className="small-button" disabled={busy} onClick={() => updateStatus(item._id, item.status === 'active' ? 'archived' : 'active')}>{item.status === 'active' ? 'Archive' : 'Restore'}</button>}
+                {canDelete && <button type="button" className="small-button danger" disabled={busy} onClick={() => remove(item._id)}>Delete</button>}
+              </div>
+            </div>
+          )) : <p className="empty-state">No documents available for this role or filter.</p>}
+        </div>
+        <p className="form-message success-message">{notice}</p>
+      </section>
+      {canUpload && (
+        <form className="panel form-panel" onSubmit={submit}>
+          <div className="panel-kicker">POST /api/documents/uploads</div>
+          <h2>Upload document</h2>
+          <label>Employee
+            <select value={form.employeeId} onChange={(event) => setForm({ ...form, employeeId: event.target.value })} required disabled={busy}>
+              <option value="">Choose employee</option>
+              {employees.map((employee) => <option key={employee._id} value={employee._id}>{employee.name} · {employee.email}</option>)}
+            </select>
+          </label>
+          <label>Document type
+            <select value={form.documentType} onChange={(event) => setForm({ ...form, documentType: event.target.value })} disabled={busy}>
+              {['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'].map((type) => <option key={type} value={type}>{type}</option>)}
+            </select>
+          </label>
+          <label className="file-picker">
+            <span className="upload-icon">↑</span>
+            <strong>{file?.name || 'Choose a document'}</strong>
+            <small>PDF, JPG, JPEG, PNG · max 5 MB · uploaded in 1 MB chunks</small>
+            <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(event) => setFile(event.target.files[0] || null)} required disabled={busy} />
+          </label>
+          {uploadProgress && (
+            <div className="chunk-upload-progress" role="status" aria-live="polite">
+              <div className="chunk-upload-progress-label">
+                <span>{uploadProgress.phase === 'starting' ? 'Preparing upload…' : uploadProgress.phase === 'finalizing' ? 'Finalizing document…' : 'Uploading chunks…'}</span>
+                <strong>{Math.floor((uploadProgress.sent / uploadProgress.total) * 100)}%</strong>
+              </div>
+              <progress value={uploadProgress.sent} max={uploadProgress.total} aria-label="Document upload progress" />
+              <small>{(uploadProgress.sent / (1024 * 1024)).toFixed(1)} MB of {(uploadProgress.total / (1024 * 1024)).toFixed(1)} MB sent</small>
+            </div>
+          )}
+          <button className="primary-button" disabled={busy || !form.employeeId || !file}>
+            {busy ? 'Uploading...' : 'Upload document'} <span>↑</span>
+          </button>
+          {busy && uploadProgress?.phase !== 'finalizing' && (
+            <button type="button" className="quiet-button cancel-upload-button" onClick={cancelUpload}>Cancel upload</button>
+          )}
+          <p className="form-message success-message">{notice}</p>
+        </form>
+      )}
+    </div>
+  );
 }
 
 function LeaveScreen({ leaves, userRole, request, refresh }) {

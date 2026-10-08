@@ -5,6 +5,10 @@ const { port } = require('./config/env');
 const { seedDefaultEmployees } = require('./services/employeeService');
 const { connectRedis } = require('./utils/redisClient');
 const { attachRealtimeServer } = require('./realtime/socketServer');
+const {
+  cleanExpiredChunkedUploads,
+  startChunkedUploadCleanup
+} = require('./services/chunkedUploadCleanup');
 
 const server = http.createServer(app);
 attachRealtimeServer(server);
@@ -12,6 +16,8 @@ attachRealtimeServer(server);
 const startServer = async () => {
   try {
     await connectDatabase();
+    await cleanExpiredChunkedUploads();
+    startChunkedUploadCleanup();
     await seedDefaultEmployees();
     connectRedis();
     console.log('Default employees are ready');

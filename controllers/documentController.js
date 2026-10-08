@@ -1,18 +1,39 @@
 const mongoose = require('mongoose');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const Document = require('../models/documentModel');
+const ChunkedUpload = require('../models/chunkedUploadModel');
 const Employee = require('../models/employeeModel');
 const AppError = require('../utils/appError');
 const asyncHandler = require('../utils/asyncHandler');
 const { ROLES } = require('../roles');
 const {
+  documentsRoot,
+  ensureDocumentsDirectory,
   getDocumentPath,
   removeDocumentFile,
   validateDocumentSignature
 } = require('../utils/documentStorage');
 const { processDocumentOcr } = require('../services/documentOcrService');
+const {
+  chunkSize,
+  chunkedUploadsRoot,
+  getChunkPath,
+  writeChunk,
+  assembleChunks,
+  removeChunkDirectory
+} = require('../utils/chunkedUploadStorage');
+const { cleanExpiredChunkedUploads } = require('../services/chunkedUploadCleanup');
 
 const privilegedRoles = [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.HR_MANAGER, 'hr'];
 const employeeAllowedDocumentTypes = ['Aadhar', 'PAN', 'Passport', 'Resume', 'Other'];
+const uploadMimeExtensions = new Map([
+  ['application/pdf', '.pdf'],
+  ['image/jpeg', '.jpg'],
+  ['image/png', '.png']
+]);
+const chunkedUploadLifetimeMs = 24 * 60 * 60 * 1000;
 
 const toPublicDocument = (document) => {
   const value = document.toObject ? document.toObject() : document;
@@ -96,6 +117,209 @@ const validateUploadedFile = (file) => {
     throw new AppError('File content does not match the declared PDF or image type', 400);
   }
 };
+
+const getOwnedChunkedUpload = async (uploadId, userId) => {
+  const upload = await ChunkedUpload.findOne({ uploadId, userId });
+  if (!upload) throw new AppError('Upload session not found', 404);
+  if (upload.expiresAt <= new Date()) {
+    await removeChunkDirectory(upload.uploadId);
+    await upload.deleteOne();
+    throw new AppError('Upload session has expired', 410);
+  }
+  return upload;
+};
+
+const initiateChunkedDocumentUpload = asyncHandler(async (req, res) => {
+  const {
+    employeeId,
+    documentType,
+    originalFileName,
+    mimeType,
+    fileSize
+  } = req.body;
+
+  const safeFileName = path.win32.basename(path.posix.basename(originalFileName));
+  const expectedExtension = uploadMimeExtensions.get(mimeType);
+  if (!expectedExtension || path.extname(safeFileName).toLowerCase() !== expectedExtension
+    && !(mimeType === 'image/jpeg' && path.extname(safeFileName).toLowerCase() === '.jpeg')) {
+    throw new AppError('File name extension must match the declared PDF or image type', 400);
+  }
+
+  const employee = await getAccessibleEmployee(employeeId, req.user);
+  if (req.user.role === ROLES.EMPLOYEE && !employeeAllowedDocumentTypes.includes(documentType)) {
+    throw new AppError('Employees can upload only personal identity and resume documents', 403);
+  }
+
+  await cleanExpiredChunkedUploads();
+
+  const uploadId = crypto.randomUUID();
+  const totalChunks = Math.ceil(fileSize / chunkSize);
+  const upload = await ChunkedUpload.create({
+    uploadId,
+    userId: req.user._id,
+    employeeId: employee._id,
+    documentType,
+    originalFileName: safeFileName,
+    mimeType,
+    fileSize,
+    totalChunks,
+    expiresAt: new Date(Date.now() + chunkedUploadLifetimeMs)
+  });
+
+  try {
+    await fs.promises.mkdir(path.join(chunkedUploadsRoot, uploadId), { recursive: true });
+  } catch (error) {
+    await upload.deleteOne();
+    throw error;
+  }
+
+  res.status(201).json({
+    success: true,
+    message: 'Chunked upload initialized',
+    data: { uploadId, chunkSize, totalChunks, expiresAt: upload.expiresAt }
+  });
+});
+
+const uploadDocumentChunk = asyncHandler(async (req, res) => {
+  if (!req.is('application/octet-stream')) {
+    throw new AppError('Chunk content type must be application/octet-stream', 415);
+  }
+
+  const upload = await getOwnedChunkedUpload(req.params.uploadId, req.user._id);
+  if (upload.status !== 'uploading') throw new AppError('Upload session is being finalized', 409);
+  if (!/^(0|[1-9]\d*)$/.test(req.params.chunkIndex)) {
+    throw new AppError('Invalid chunk index', 400);
+  }
+
+  const chunkIndex = Number(req.params.chunkIndex);
+  if (!Number.isSafeInteger(chunkIndex) || chunkIndex >= upload.totalChunks) {
+    throw new AppError('Chunk index is outside this upload', 400);
+  }
+  if (upload.receivedChunks.includes(chunkIndex)) {
+    throw new AppError('This chunk has already been uploaded', 409);
+  }
+
+  const expectedBytes = Math.min(chunkSize, upload.fileSize - chunkIndex * chunkSize);
+  if (req.headers['content-length'] !== undefined
+    && Number(req.headers['content-length']) !== expectedBytes) {
+    throw new AppError('Chunk size does not match the expected size', 400);
+  }
+
+  await writeChunk(req, upload.uploadId, chunkIndex, expectedBytes);
+
+  const updatedUpload = await ChunkedUpload.findOneAndUpdate(
+    {
+      _id: upload._id,
+      status: 'uploading',
+      receivedChunks: { $ne: chunkIndex }
+    },
+    { $addToSet: { receivedChunks: chunkIndex } },
+    { new: true }
+  );
+
+  if (!updatedUpload) {
+    await fs.promises.rm(getChunkPath(upload.uploadId, chunkIndex), { force: true });
+    throw new AppError('Upload session is no longer accepting chunks', 409);
+  }
+
+  res.json({
+    success: true,
+    message: 'Chunk uploaded',
+    data: {
+      uploadId: upload.uploadId,
+      receivedChunks: updatedUpload.receivedChunks.length,
+      totalChunks: updatedUpload.totalChunks
+    }
+  });
+});
+
+const completeChunkedDocumentUpload = asyncHandler(async (req, res) => {
+  const currentUpload = await getOwnedChunkedUpload(req.params.uploadId, req.user._id);
+  if (currentUpload.status !== 'uploading') {
+    throw new AppError('Upload session is already being finalized', 409);
+  }
+  if (currentUpload.receivedChunks.length !== currentUpload.totalChunks) {
+    const missingChunks = Array.from(
+      { length: currentUpload.totalChunks },
+      (_, index) => index
+    ).filter((index) => !currentUpload.receivedChunks.includes(index));
+    throw new AppError('Upload is incomplete', 400, missingChunks.map((index) => ({
+      chunkIndex: index
+    })));
+  }
+
+  const upload = await ChunkedUpload.findOneAndUpdate(
+    { _id: currentUpload._id, status: 'uploading' },
+    {
+      $set: {
+        status: 'assembling',
+        expiresAt: new Date(Date.now() + chunkedUploadLifetimeMs)
+      }
+    },
+    { new: true }
+  );
+  if (!upload) throw new AppError('Upload session is already being finalized', 409);
+
+  const filename = `${crypto.randomUUID()}${uploadMimeExtensions.get(upload.mimeType)}`;
+  const filePath = path.join(documentsRoot, filename);
+  ensureDocumentsDirectory();
+  let documentCreated = false;
+
+  try {
+    await assembleChunks(upload.uploadId, upload.totalChunks, filePath);
+    const file = {
+      filename,
+      path: filePath,
+      originalname: upload.originalFileName,
+      mimetype: upload.mimeType,
+      size: upload.fileSize
+    };
+    await validateUploadedFile(file);
+    const employee = await getAccessibleEmployee(upload.employeeId, req.user);
+
+    const document = await Document.create({
+      employeeId: employee._id,
+      documentType: upload.documentType,
+      originalFileName: upload.originalFileName,
+      fileName: filename,
+      filePath: filename,
+      fileSize: upload.fileSize,
+      mimeType: upload.mimeType,
+      uploadedBy: req.user._id,
+      status: 'active'
+    });
+    documentCreated = true;
+    await processDocumentOcr(document);
+    await removeChunkDirectory(upload.uploadId);
+    await upload.deleteOne();
+
+    res.status(201).json({
+      success: true,
+      message: 'Document uploaded successfully',
+      data: toPublicDocument(document)
+    });
+  } catch (error) {
+    if (!documentCreated) removeDocumentFile(filename);
+    if (documentCreated) {
+      await removeChunkDirectory(upload.uploadId);
+      await upload.deleteOne();
+    } else {
+      await ChunkedUpload.updateOne({ _id: upload._id }, { $set: { status: 'uploading' } });
+    }
+    throw error;
+  }
+});
+
+const cancelChunkedDocumentUpload = asyncHandler(async (req, res) => {
+  const upload = await getOwnedChunkedUpload(req.params.uploadId, req.user._id);
+  if (upload.status !== 'uploading') {
+    throw new AppError('Upload session is being finalized', 409);
+  }
+
+  await removeChunkDirectory(upload.uploadId);
+  await upload.deleteOne();
+  res.json({ success: true, message: 'Upload cancelled' });
+});
 
 const buildDocumentQuery = async (req) => {
   const query = {};
@@ -282,6 +506,10 @@ const deleteDocument = asyncHandler(async (req, res) => {
 
 module.exports = {
   uploadDocumentFile,
+  initiateChunkedDocumentUpload,
+  uploadDocumentChunk,
+  completeChunkedDocumentUpload,
+  cancelChunkedDocumentUpload,
   getDocuments,
   getDocumentById,
   extractDocumentOcr,

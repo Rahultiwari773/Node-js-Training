@@ -29,7 +29,14 @@ const removeDocumentFile = (fileName) => {
 const hasPrefix = (buffer, prefix) => prefix.every((byte, index) => buffer[index] === byte);
 
 const validateDocumentSignature = (filePath, mimeType) => {
-  const header = fs.readFileSync(filePath).subarray(0, 12);
+  const descriptor = fs.openSync(filePath, 'r');
+  const header = Buffer.alloc(12);
+
+  try {
+    fs.readSync(descriptor, header, 0, header.length, 0);
+  } finally {
+    fs.closeSync(descriptor);
+  }
 
   if (mimeType === 'application/pdf') return header.subarray(0, 5).toString() === '%PDF-';
   if (mimeType === 'image/jpeg') return hasPrefix(header, [0xff, 0xd8, 0xff]);

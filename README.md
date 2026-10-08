@@ -60,3 +60,19 @@ To try it locally, run both `npm run dev` and `npm run frontend:dev`, sign in fr
 - Authenticated file preview and download links
 - Helmet, CORS, rate limiting, request sanitization, and validation
 - React dashboard for testing the API by role
+
+## Resumable chunked document uploads
+
+`POST /api/documents/uploads` starts an authenticated upload. Send JSON containing `employeeId`, `documentType`, `originalFileName`, `mimeType`, and `fileSize` (1 byte to 5 MB). The response includes a UUID `uploadId`, a 1 MiB `chunkSize`, and `totalChunks`. Supported files are PDF, JPG/JPEG, and PNG.
+
+Send each chunk as a raw `application/octet-stream` request body, using zero-based chunk indexes:
+
+```text
+PUT /api/documents/uploads/{uploadId}/chunks/{chunkIndex}
+POST /api/documents/uploads/{uploadId}/complete
+DELETE /api/documents/uploads/{uploadId}
+```
+
+For example, in a browser client, slice the `File` into chunks using the returned chunk size and `PUT` each `file.slice(index * chunkSize, (index + 1) * chunkSize)` to its chunk URL. Call `complete` after all chunks are accepted. The server streams each chunk to disk, assembles the file as a stream, and then applies the same file-signature checks, employee access rules, and OCR processing as the existing single-request upload. Sessions are private to the authenticated user, expire after 24 hours, and can be cancelled with `DELETE`. `POST /api/documents/upload` remains available for regular multipart uploads.
+
+The React **Documents → Upload document** form uses this chunked flow automatically: it starts a session, uploads chunks sequentially, displays byte progress, and finalizes the document. Use **Cancel upload** to abort and discard the current session.
