@@ -15,7 +15,6 @@ const {
   removeDocumentFile,
   validateDocumentSignature
 } = require('../utils/documentStorage');
-const { processDocumentOcr } = require('../services/documentOcrService');
 const {
   chunkSize,
   chunkedUploadsRoot,
@@ -25,9 +24,10 @@ const {
   removeChunkDirectory
 } = require('../utils/chunkedUploadStorage');
 const { cleanExpiredChunkedUploads } = require('../services/chunkedUploadCleanup');
+const { processDocumentOcr, isImageSuitableForOcr } = require('../services/documentOcrService');
 
 const privilegedRoles = [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.HR_MANAGER, 'hr'];
-const employeeAllowedDocumentTypes = ['Aadhar', 'PAN', 'Passport', 'Resume', 'Other'];
+const employeeAllowedDocumentTypes = ['Aadhar', 'PAN', 'Voter ID', 'Driving Licence', 'Passport', 'Resume', 'Other'];
 const uploadMimeExtensions = new Map([
   ['application/pdf', '.pdf'],
   ['image/jpeg', '.jpg'],
@@ -106,7 +106,7 @@ const getEmployeeIdsForUser = async (user) => {
   return [];
 };
 
-const validateUploadedFile = (file) => {
+const validateUploadedFile = async (file) => {
   if (!file) {
     throw new AppError('A file is required', 400);
   }
@@ -115,6 +115,14 @@ const validateUploadedFile = (file) => {
   if (!isValidSignature) {
     removeDocumentFile(file.filename);
     throw new AppError('File content does not match the declared PDF or image type', 400);
+  }
+
+  if (file.mimetype.startsWith('image/')) {
+    const isSharpEnough = await isImageSuitableForOcr(file.path);
+    if (!isSharpEnough) {
+      removeDocumentFile(file.filename);
+      throw new AppError('The uploaded image is too blurry or low-contrast for OCR. Please upload a clearer document.', 400);
+    }
   }
 };
 
@@ -348,7 +356,7 @@ const uploadDocumentFile = asyncHandler(async (req, res) => {
   const file = req.file;
 
   try {
-    validateUploadedFile(file);
+    await validateUploadedFile(file);
     const employee = await getAccessibleEmployee(employeeId, req.user);
 
     if (req.user.role === ROLES.EMPLOYEE && !employeeAllowedDocumentTypes.includes(documentType)) {
@@ -464,7 +472,7 @@ const updateDocument = asyncHandler(async (req, res) => {
 
   try {
     if (newFile) {
-      validateUploadedFile(newFile);
+      await validateUploadedFile(newFile);
       document.originalFileName = newFile.originalname;
       document.fileName = newFile.filename;
       document.filePath = newFile.filename;

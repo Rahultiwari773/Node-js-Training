@@ -593,7 +593,7 @@ function DocumentOcrPanel({ documents, request, refresh }) {
   const [previewError, setPreviewError] = useState('');
   const selected = documents.find((document) => (document._id || document.id) === selectedId) || documents[0];
   const fieldEntries = Object.entries(selected?.ocrFields || {})
-    .filter(([key]) => key !== 'needsReview')
+    .filter(([key]) => !['needsReview', 'validationErrors'].includes(key))
     .flatMap(([key, value]) => key === 'additionalDetails' && Array.isArray(value)
       ? value.map((detail, index) => [`additional-${index}`, detail.label, detail.value])
       : [[key, key.replace(/([A-Z])/g, ' $1'), value]]);
@@ -642,7 +642,11 @@ function DocumentOcrPanel({ documents, request, refresh }) {
           <span>Confidence <strong>{selected.ocrConfidence === null || selected.ocrConfidence === undefined ? '—' : `${Number(selected.ocrConfidence).toFixed(1)}%`}</strong></span>
           <span>Processed <strong>{selected.ocrProcessedAt ? new Date(selected.ocrProcessedAt).toLocaleString() : 'Not yet'}</strong></span>
         </div>
-        {selected.ocrStatus === 'not_supported' && <p className="form-message">This PDF has no text layer. Image conversion is required for scanned PDF OCR.</p>}
+        {selected.ocrStatus === 'not_supported' && <p className="form-message" role="alert">This file could not be rendered for OCR. Try uploading a clear image or a searchable PDF.</p>}
+        {selected.ocrStatus === 'failed' && <p className="form-message" role="alert">We could not read this document. Upload a sharp, well-lit image showing the complete document, or enter the details manually.</p>}
+        {selected.ocrFields?.validationErrors?.map((message) => <p className="form-message" role="alert" key={message}>{message}</p>)}
+        {selected.ocrStatus === 'completed' && <p className="muted" role="note">OCR is not proof of identity or document authenticity. Check every extracted value against the original before using it.</p>}
+        {selected.ocrStatus === 'completed' && Number(selected.ocrConfidence) < 50 && <p className="form-message" role="alert">OCR confidence is low. Carefully verify the extracted values or upload a clearer image.</p>}
         <div className="ocr-actions">
           <button type="button" className="small-button" onClick={openPreview} disabled={busy}>{busy ? 'Loading...' : 'Preview original'}</button>
           <button type="button" className="small-button" onClick={() => setShowDetails(true)}>View field details</button>
@@ -658,7 +662,8 @@ function DocumentOcrPanel({ documents, request, refresh }) {
           <div><div className="panel-kicker">Verified before use</div><h2 id="document-fields-title">Extracted fields</h2></div>
           <button type="button" className="icon-button" onClick={() => setShowDetails(false)} aria-label="Close details">×</button>
         </div>
-        <p className="muted">OCR values should be checked against the original document.</p>
+        <p className="muted">OCR values are estimates, not proof of identity or authenticity. Verify every value against the original document.</p>
+        {selected.ocrFields?.validationErrors?.map((message) => <p className="form-message" role="alert" key={message}>{message}</p>)}
         <div className="field-table">
           {fieldEntries.length ? fieldEntries.map(([key, label, value]) => <div className="field-row" key={key}>
             <span>{label}</span><strong>{value}</strong>
@@ -847,7 +852,7 @@ function DocumentScreen({ documents, setDocuments, employees, user, request, ref
           <input value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} placeholder="Search filename" />
           <select value={filters.documentType} onChange={(event) => setFilters({ ...filters, documentType: event.target.value })}>
             <option value="">All types</option>
-            {['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'].map((type) => <option key={type} value={type}>{type}</option>)}
+            {['Aadhar', 'PAN', 'Voter ID', 'Driving Licence', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'].map((type) => <option key={type} value={type}>{type}</option>)}
           </select>
           <select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
             <option value="">All status</option><option value="active">Active</option><option value="archived">Archived</option>
@@ -881,7 +886,7 @@ function DocumentScreen({ documents, setDocuments, employees, user, request, ref
           </label>
           <label>Document type
             <select value={form.documentType} onChange={(event) => setForm({ ...form, documentType: event.target.value })} disabled={busy}>
-              {['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'].map((type) => <option key={type} value={type}>{type}</option>)}
+              {['Aadhar', 'PAN', 'Voter ID', 'Driving Licence', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'].map((type) => <option key={type} value={type}>{type}</option>)}
             </select>
           </label>
           <label className="file-picker">

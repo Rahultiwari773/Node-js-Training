@@ -31,12 +31,20 @@ const findAadhaarName = (text) => {
   )) || '';
 };
 
+const findDocumentNumber = (text, pattern, labels) => {
+  const labeledValue = findLabeledValue(text, labels);
+  const normalizedValue = labeledValue.replace(/[\s-]/g, '').toUpperCase();
+  if (normalizedValue && pattern.test(normalizedValue)) return normalizedValue;
+
+  return text.match(pattern)?.[0]?.replace(/[\s-]/g, '').toUpperCase() || '';
+};
+
 const extractStructuredFields = (text, documentType) => {
   const normalizedText = text.replace(/\r/g, '').replace(/[ \t]+/g, ' ');
   const fields = {
     name: documentType === 'Aadhar'
       ? findAadhaarName(normalizedText)
-      : findLabeledValue(normalizedText, ['full name', 'name']),
+      : findLabeledValue(normalizedText, ['full name', 'name', 'elector name', "elector's name", 'name of elector']),
     dateOfBirth: findLabeledValue(normalizedText, ['date of birth', 'dob', 'birth date']),
     address: findLabeledValue(normalizedText, ['address', 'residential address']),
     gender: findLabeledValue(normalizedText, ['gender', 'sex'])
@@ -47,8 +55,26 @@ const extractStructuredFields = (text, documentType) => {
   }
 
   if (documentType === 'PAN') {
-    fields.panNumber = normalizedText.match(/\b[A-Z]{5}\d{4}[A-Z]\b/i)?.[0]?.toUpperCase() || '';
+    fields.panNumber = findDocumentNumber(normalizedText, /\b[A-Z]{5}\d{4}[A-Z]\b/i, ['pan number', 'permanent account number', 'pan']);
     fields.fatherName = findLabeledValue(normalizedText, ['father name', "father's name"]);
+  }
+
+  if (documentType === 'Voter ID') {
+    fields.voterIdNumber = findDocumentNumber(normalizedText, /\b[A-Z]{3}\s*-?\s*\d{7}\b/i, ['voter id', 'epic number', 'epic no', 'elector photo identity card']);
+    fields.relativeName = findLabeledValue(normalizedText, ['father name', "father's name", 'husband name', "husband's name", 'relative name']);
+  }
+
+  if (documentType === 'Driving Licence') {
+    fields.drivingLicenseNumber = findDocumentNumber(normalizedText, /\b[A-Z]{2}\s*-?\s*\d{2}\s*-?\s*\d{4}\s*-?\s*\d{7}\b/i, [
+      'driving licence number',
+      'driving license number',
+      'licence number',
+      'license number',
+      'dl number',
+      'dl no'
+    ]);
+    fields.issueDate = findLabeledValue(normalizedText, ['date of issue', 'issue date']);
+    fields.expiryDate = findLabeledValue(normalizedText, ['valid till', 'validity', 'date of expiry', 'expiry date']);
   }
 
   if (documentType === 'Passport') {
@@ -69,6 +95,10 @@ const extractStructuredFields = (text, documentType) => {
   const knownLabels = new Set([
     'name', 'full name', 'date of birth', 'dob', 'birth date', 'address', 'residential address',
     'gender', 'sex', 'aadhaar number', 'aadhar number', 'pan number', 'father name', "father's name",
+    'permanent account number', 'pan', 'voter id', 'epic number', 'epic no', 'elector photo identity card',
+    'elector name', "elector's name", 'name of elector',
+    'husband name', "husband's name", 'relative name', 'driving licence number', 'driving license number',
+    'licence number', 'license number', 'dl number', 'dl no', 'valid till', 'validity',
     'passport number', 'nationality', 'date of issue', 'issue date', 'date of expiry', 'expiry date',
     'employee id', 'employee number', 'staff id', 'department', 'division', 'designation', 'job title',
     'position', 'joining date', 'date of joining', 'salary', 'gross salary', 'net salary'
@@ -93,14 +123,35 @@ const extractStructuredFields = (text, documentType) => {
     if (key !== 'additionalDetails' && !fields[key]) delete fields[key];
   });
 
+  const validationErrors = [];
+  const requiredIdentityFields = {
+    Aadhar: ['aadhaarNumber'],
+    PAN: ['panNumber'],
+    'Voter ID': ['voterIdNumber'],
+    'Driving Licence': ['drivingLicenseNumber']
+  };
+  const identityPatterns = {
+    aadhaarNumber: /^\d{12}$/,
+    panNumber: /^[A-Z]{5}\d{4}[A-Z]$/,
+    voterIdNumber: /^[A-Z]{3}\d{7}$/,
+    drivingLicenseNumber: /^[A-Z]{2}\d{2}\d{4}\d{7}$/
+  };
+  const expectedFields = requiredIdentityFields[documentType] || [];
+  expectedFields.forEach((key) => {
+    if (!fields[key] || !identityPatterns[key].test(fields[key])) {
+      validationErrors.push(`A valid ${key.replace(/([A-Z])/g, ' $1').toLowerCase()} was not detected. Check the document image and enter the value manually if necessary.`);
+    }
+  });
+
   return {
     ...fields,
-    needsReview: true
+    needsReview: true,
+    ...(validationErrors.length ? { validationErrors } : {})
   };
 };
 
 const formatStructuredFields = (fields) => Object.entries(fields)
-  .filter(([key]) => key !== 'needsReview')
+  .filter(([key]) => !['needsReview', 'validationErrors'].includes(key))
   .flatMap(([key, value]) => key === 'additionalDetails'
     ? value.map(({ label, value: detailValue }) => `${label}: ${detailValue}`)
     : [`${key.replace(/([A-Z])/g, ' $1')}: ${value}`])
@@ -109,19 +160,25 @@ const formatStructuredFields = (fields) => Object.entries(fields)
 const scoreImageResult = (result, documentType) => {
   const fields = extractStructuredFields(result.text, documentType);
   const fieldValues = Object.entries(fields)
-    .filter(([key]) => key !== 'needsReview' && key !== 'additionalDetails')
+    .filter(([key]) => !['needsReview', 'validationErrors', 'additionalDetails'].includes(key))
     .filter(([, value]) => Boolean(value));
   const preferredFields = documentType === 'Aadhar'
     ? ['name', 'dateOfBirth', 'aadhaarNumber']
-    : ['name', 'panNumber', 'passportNumber', 'employeeId', 'salary'];
+    : documentType === 'PAN'
+      ? ['name', 'panNumber', 'dateOfBirth']
+      : documentType === 'Voter ID'
+        ? ['name', 'voterIdNumber', 'dateOfBirth']
+        : documentType === 'Driving Licence'
+          ? ['name', 'drivingLicenseNumber', 'dateOfBirth']
+          : ['name', 'panNumber', 'passportNumber', 'employeeId', 'salary'];
   const preferredCount = preferredFields.filter((key) => Boolean(fields[key])).length;
   const otherCount = fieldValues.length - preferredCount;
 
   return result.confidence + preferredCount * 12 + otherCount * 3 + Math.min(result.text.length, 500) / 250;
 };
 
-const prepareImageVariants = async (filePath) => {
-  const normalized = await sharp(filePath, { limitInputPixels: 40_000_000 })
+const prepareImageVariants = async (image) => {
+  const normalized = await sharp(image, { limitInputPixels: 40_000_000 })
     .rotate()
     .resize({ width: 2400, height: 3400, fit: 'inside' })
     .grayscale()
@@ -137,52 +194,125 @@ const prepareImageVariants = async (filePath) => {
   return [normalized, highContrast];
 };
 
-const extractImageText = async (filePath, documentType) => {
-  const worker = await createWorker('eng');
+const measureImageSharpness = async (image) => {
+  const { data, info } = await sharp(image)
+    .greyscale()
+    .resize({ width: 400, height: 400, fit: 'inside', withoutEnlargement: true })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
 
-  try {
-    const imageVariants = await prepareImageVariants(filePath);
-    const pageSegmentationModes = documentType === 'Aadhar'
-      ? [PSM.SPARSE_TEXT, PSM.SINGLE_BLOCK, PSM.AUTO]
-      : [PSM.AUTO, PSM.SINGLE_BLOCK];
-    const candidates = [];
+  let total = 0;
+  let count = 0;
 
-    for (const mode of pageSegmentationModes) {
-      await worker.setParameters({
-        tessedit_pageseg_mode: mode,
-        preserve_interword_spaces: '1'
-      });
-      for (const image of imageVariants) {
-        const result = await worker.recognize(image);
-        candidates.push({
-          text: result.data.text.trim(),
-          confidence: Number(result.data.confidence || 0)
-        });
-      }
+  for (let y = 1; y < info.height - 1; y += 1) {
+    for (let x = 1; x < info.width - 1; x += 1) {
+      const index = (y * info.width) + x;
+      const current = data[index];
+      const left = data[index - 1];
+      const right = data[index + 1];
+      const top = data[index - info.width];
+      const bottom = data[index + info.width];
+      const laplacian = 4 * current - left - right - top - bottom;
+
+      total += laplacian * laplacian;
+      count += 1;
     }
+  }
 
-    return candidates.reduce((best, candidate) => (
-      scoreImageResult(candidate, documentType) > scoreImageResult(best, documentType) ? candidate : best
-    ));
+  return count ? total / count : 0;
+};
+
+const isImageSuitableForOcr = async (image) => {
+  try {
+    const sharpness = await measureImageSharpness(image);
+    return sharpness >= 300;
+  } catch (error) {
+    return false;
+  }
+};
+
+const unreadableImageError = () => {
+  const error = new Error('This document is too blurry, too dark, or low-contrast to read. Upload a sharp, well-lit image showing the complete document.');
+  error.code = 'OCR_BLURRY_IMAGE';
+  return error;
+};
+
+const recognizeImage = async (worker, image, documentType) => {
+  const imageVariants = await prepareImageVariants(image);
+  const pageSegmentationModes = documentType === 'Aadhar'
+    ? [PSM.SPARSE_TEXT, PSM.SINGLE_BLOCK, PSM.AUTO]
+    : [PSM.AUTO, PSM.SINGLE_BLOCK];
+  const candidates = [];
+
+  for (const mode of pageSegmentationModes) {
+    await worker.setParameters({
+      tessedit_pageseg_mode: mode,
+      preserve_interword_spaces: '1'
+    });
+    for (const imageVariant of imageVariants) {
+      const result = await worker.recognize(imageVariant);
+      candidates.push({
+        text: result.data.text.trim(),
+        confidence: Number(result.data.confidence || 0)
+      });
+    }
+  }
+
+  return candidates.reduce((best, candidate) => (
+    scoreImageResult(candidate, documentType) > scoreImageResult(best, documentType) ? candidate : best
+  ));
+};
+
+const extractImageText = async (filePath, documentType) => {
+  if (!await isImageSuitableForOcr(filePath)) throw unreadableImageError();
+
+  const worker = await createWorker('eng');
+  try {
+    return await recognizeImage(worker, filePath, documentType);
   } finally {
     await worker.terminate();
   }
 };
 
-const extractPdfText = async (filePath) => {
+const extractPdfText = async (filePath, documentType) => {
   const buffer = await fs.readFile(filePath);
   const parser = new PDFParse({ data: buffer });
-  const result = await parser.getText();
-  await parser.destroy();
-  const text = result.text.trim();
+  try {
+    const result = await parser.getText();
+    const text = result.text.trim();
+    if (text.length >= 40) return { text, confidence: 100 };
 
-  if (!text) {
-    const error = new Error('Scanned PDFs require image conversion before OCR');
-    error.code = 'OCR_NOT_SUPPORTED';
-    throw error;
+    const screenshots = await parser.getScreenshot({
+      first: 3,
+      desiredWidth: 1800,
+      imageBuffer: true,
+      imageDataUrl: false
+    });
+    if (!screenshots.pages.length) {
+      const error = new Error('No readable pages were found in this PDF.');
+      error.code = 'OCR_NOT_SUPPORTED';
+      throw error;
+    }
+
+    const worker = await createWorker('eng');
+    try {
+      const pageResults = [];
+      for (const page of screenshots.pages) {
+        if (await isImageSuitableForOcr(Buffer.from(page.data))) {
+          pageResults.push(await recognizeImage(worker, Buffer.from(page.data), documentType));
+        }
+      }
+      if (!pageResults.length) throw unreadableImageError();
+      return {
+        text: pageResults.map((page) => page.text).filter(Boolean).join('\n'),
+        confidence: pageResults.reduce((total, page) => total + page.confidence, 0) / pageResults.length
+      };
+    } finally {
+      await worker.terminate();
+    }
+  } finally {
+    await parser.destroy();
   }
-
-  return { text, confidence: 100 };
 };
 
 const extractDocumentText = async (document) => {
@@ -193,7 +323,7 @@ const extractDocumentText = async (document) => {
   }
 
   if (document.mimeType === 'application/pdf') {
-    return extractPdfText(filePath);
+    return extractPdfText(filePath, document.documentType);
   }
 
   return extractImageText(filePath, document.documentType);
@@ -233,5 +363,6 @@ module.exports = {
   extractStructuredFields,
   extractDocumentText,
   processDocumentOcr,
-  getDocumentWithOcr
+  getDocumentWithOcr,
+  isImageSuitableForOcr
 };

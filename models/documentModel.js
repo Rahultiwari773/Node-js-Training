@@ -3,6 +3,8 @@ const mongoose = require('mongoose');
 const documentTypes = [
   'Aadhar',
   'PAN',
+  'Voter ID',
+  'Driving Licence',
   'Passport',
   'Resume',
   'Offer Letter',

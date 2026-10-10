@@ -200,7 +200,7 @@ addEndpoint('/documents', 'get', documentTag, 'List and filter documents', {
     queryParameter('page', 'Page number, starting at 1', { type: 'integer', minimum: 1 }),
     queryParameter('limit', 'Page size, maximum 100', { type: 'integer', minimum: 1, maximum: 100 }),
     queryParameter('employeeId', 'Filter by employee MongoDB ID', { type: 'string' }),
-    queryParameter('documentType', 'Filter by document type', { type: 'string', enum: ['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'] }),
+    queryParameter('documentType', 'Filter by document type', { type: 'string', enum: ['Aadhar', 'PAN', 'Voter ID', 'Driving Licence', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'] }),
     queryParameter('status', 'Filter by document status', { type: 'string', enum: ['active', 'archived'] }),
     queryParameter('search', 'Search original file names', { type: 'string', maxLength: 100 })
   ]
@@ -521,7 +521,7 @@ module.exports = {
       DocumentUpload: {
         type: 'object', required: ['file', 'employeeId', 'documentType'], properties: {
           file: { type: 'string', format: 'binary' }, employeeId: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' },
-          documentType: { type: 'string', enum: ['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'] }
+          documentType: { type: 'string', enum: ['Aadhar', 'PAN', 'Voter ID', 'Driving Licence', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'] }
         }
       },
       ChunkedUploadRequest: {
@@ -529,7 +529,7 @@ module.exports = {
         required: ['employeeId', 'documentType', 'originalFileName', 'mimeType', 'fileSize'],
         properties: {
           employeeId: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' },
-          documentType: { type: 'string', enum: ['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'] },
+          documentType: { type: 'string', enum: ['Aadhar', 'PAN', 'Voter ID', 'Driving Licence', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'] },
           originalFileName: { type: 'string', minLength: 1, maxLength: 255 },
           mimeType: { type: 'string', enum: ['application/pdf', 'image/jpeg', 'image/png'] },
           fileSize: { type: 'integer', minimum: 1, maximum: 5242880 }
@@ -556,7 +556,7 @@ module.exports = {
       DocumentUpdate: {
         type: 'object', properties: {
           file: { type: 'string', format: 'binary' },
-          documentType: { type: 'string', enum: ['Aadhar', 'PAN', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'] },
+          documentType: { type: 'string', enum: ['Aadhar', 'PAN', 'Voter ID', 'Driving Licence', 'Passport', 'Resume', 'Offer Letter', 'Joining Letter', 'Experience Letter', 'Salary Slip', 'Other'] },
           status: { type: 'string', enum: ['active', 'archived'] }
         }
       }
